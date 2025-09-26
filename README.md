@@ -17,24 +17,28 @@ Together, they argue that a granular understanding of heterogeneous investors is
 
 **Folder:** `Demand-based-asset-pricing`
 
-This project revisits the demand-based asset pricing framework of Koijen & Yogo (2019). While their work establishes that latent demand is a key driver of stock return volatility, it leaves the economic origins of this demand unexplained.
+This project revisits the demand-based asset pricing framework of Koijen & Yogo (2019). While their work establishes that demand is a key driver of stock return volatility, it leaves the economic origins of this demand unexplained.
 
-- **Research Question:** Can a broad set of firm characteristics from the empirical asset pricing literature explain the latent demand component identified by Koijen & Yogo (2019)?
-- **Key Findings:**
-  - Incorporating 60+ additional firm characteristics does not systematically reduce the importance of latent demand
-  - The characteristics-based approach fails to adequately capture investor demand or account for stock return volatility
-  - A primary limitation is the use of 13F portfolio data, which masks fundamental investor heterogeneity
-- **Implications:** The study calls for a rethinking of demand measurement, suggesting future work focus on improved investor clustering, sentiment-based factors, and endogenous supply
+- **Motivation**: Koijen & Yogo show that investor demand and the holdings composition of stocks (such as predominant institutional ownership) drive stock return volatility. However, it is unclear what drives investor's holdings demand.  
+- **Approach**: We extend their model by incorporating 60 additional characteristics from the empirical asset pricing literature.  
+- **Key Findings**:  
+  - Latent demand remains central even after accounting for observed characteristics.  
+  - Investor demand is not well captured by the characteristics-based demand equation.  
+  - Significant limitations arise when using **13F portfolio data** due to investor heterogeneity and the resulting estimation issues since most investors only hold very few stocks.  
+- **Future Directions**:  
+  - Improved clustering methods.  
+  - Sentiment-based demand factors.  
+  - Incorporating endogenous stock supply into demand-based frameworks. 
 
 ### 2. The Trouble with Heterogeneity: A Guide for Models in Macroeconomics and Finance
 
 **Folder:** `Trouble-with-Heterogeneity`
 
-This paper maps the landscape of heterogeneous agent models, critiquing the common oversimplification of agent types and evaluating advanced alternatives.
+This project examines how heterogeneity is vital for models in macroeconomics & finance, describes the limitations of current state-of-the-art models in this area and outlines a roadmap for future research on improving models in macroeconomics & finance.  
 
-- **Research Question:** What are the capabilities and limitations of different frameworks (simple multi-agent, Mean-Field Games/HANK, large N-player games) for modeling heterogeneity in macro-finance?
+- **Research Question:** What are the capabilities and limitations of different frameworks (simple multi-agent, Mean-Field Games/HANK, large N-player games) for modeling heterogeneity in macroeconomics and finance?
 - **Key Contributions:**
-  - **Critique of MFGs/HANK:** While excellent for modeling rich heterogeneity, their reliance on *exogenous* aggregate risk limits their usefulness for studying the *determinants* of risk premia
+  - **Limitations of MFGs/HANK:** While excellent for modeling rich heterogeneity, their reliance on *exogenous* aggregate risk limits their usefulness for studying the *determinants* of quantities such as risk premia
   - **Advocacy for Granular Models:** Highlights that large N-player games (à la Gabaix, 2011) provide microfoundations for *endogenous* aggregate risk, making them ideal for finance applications
   - **Computational Evaluation:** Shows that naive Physics-Informed Neural Networks (PINNs) struggle with financial control problems and advocates for more robust actor-critic methods
 - **Implications:** Provides a clear guide for researchers selecting a modeling framework, emphasizing the trade-offs between realism, tractability, and the ability to study endogenous risk
