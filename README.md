@@ -22,7 +22,7 @@ Together, they argue that a granular understanding of heterogeneous investors is
 This project revisits the demand-based asset pricing framework of Koijen & Yogo (2019). While their work establishes that demand is a key driver of stock return volatility, it leaves the economic origins of this demand unexplained.
 
 - **Motivation**: Koijen & Yogo show that investor demand and the holdings composition of stocks (such as predominant institutional ownership) drive stock return volatility. However, it is unclear what drives investor's holdings demand.  
-- **Approach**: We extend their model by incorporating 60 additional characteristics from the empirical asset pricing literature.  
+- **Approach**: We extend their model by incorporating 60 additional characteristics from the empirical asset pricing literature. We use this additional data and perform variable selection procedures in order to improve the estimation of institutional investor's demand.  
 - **Key Findings**:  
   - Latent demand remains central even after accounting for observed characteristics.  
   - Investor demand is not well captured by the characteristics-based demand equation.  
