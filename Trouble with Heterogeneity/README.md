@@ -42,27 +42,3 @@ The neural network implements a 3-layer ResNet architecture:
 ### HJB Equation
 The value function V(t,a) satisfies:
 ρV = max_{c,π} [u(c) + V_t + (r + π(μ-r))a V_a - c V_a + 1/2 π²σ²a² V_aa]
-
-
-## 🔧 Training Process
-
-### Loss Function Components
-The training minimizes a composite loss function with three key components:
-
-1. **PDE Residual Loss**: Measures how well the network satisfies the HJB equation
-   ```python
-   loss_resid = torch.mean(resid**2)  # where resid = ρV - rhs #PDE loss
-   loss_term = torch.mean((V_term_pred - V_term_true)**2) #terminal loss
-   neg_grad_penalty = torch.mean(torch.relu(-V_a_col)) #Shape violation loss
-   def derivatives(model, t, a):
-    V = model(t, a)  # Forward pass through network
-    # First derivatives
-    V_t = torch.autograd.grad(V, t, grad_outputs=torch.ones_like(V),
-                            create_graph=True, retain_graph=True)[0]
-    V_a = torch.autograd.grad(V, a, grad_outputs=torch.ones_like(V),
-                            create_graph=True, retain_graph=True)[0]
-    # Second derivative
-    V_aa = torch.autograd.grad(V_a, a, grad_outputs=torch.ones_like(V_a),
-                             create_graph=True, retain_graph=True)[0]
-    return V, V_t, V_a, V_aa```
-
