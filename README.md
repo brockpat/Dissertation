@@ -1,6 +1,8 @@
 # Dissertation
 
-This repository contains the code and documentation for the two primary projects of my dissertation. The research explores the pivotal role of investor heterogeneity and demand in shaping financial markets, critiquing existing methodologies and proposing new computational and theoretical directions.
+## 📌 About  
+These projects form part of my dissertation in financial economics. The work engages with asset pricing theory, the role of demand in financial markets, and the challenges of modeling heterogeneity in macro-finance. A third and final project will be added to my dissertation.
+
 
 ## Overview
 
@@ -38,14 +40,7 @@ This project examines how heterogeneity is vital for models in macroeconomics & 
 
 - **Research Question:** What are the capabilities and limitations of different frameworks (simple multi-agent, Mean-Field Games/HANK, large N-player games) for modeling heterogeneity in macroeconomics and finance?
 - **Key Contributions:**
-  - **Limitations of MFGs/HANK:** While excellent for modeling rich heterogeneity, their reliance on *exogenous* aggregate risk limits their usefulness for studying the *determinants* of quantities such as risk premia
-  - **Advocacy for Granular Models:** Highlights that large N-player games (à la Gabaix, 2011) provide microfoundations for *endogenous* aggregate risk, making them ideal for finance applications
-  - **Computational Evaluation:** Shows that naive Physics-Informed Neural Networks (PINNs) struggle with financial control problems and advocates for more robust actor-critic methods
-- **Implications:** Provides a clear guide for researchers selecting a modeling framework, emphasizing the trade-offs between realism, tractability, and the ability to study endogenous risk
-
-## Synergy Between Projects
-
-The connection between the two projects is direct:
-
-- **Project 1** empirically demonstrates that ignoring granular heterogeneity leads to incomplete and potentially misleading conclusions in a top-demand model
-- **Project 2** provides the theoretical and computational roadmap for building the next generation of models that can properly incorporate this heterogeneity to better understand asset prices and aggregate risk
+  - **Limitations of MFGs/HANK:** While excellent for modeling rich heterogeneity, their reliance on *exogenous* aggregate risk limits their usefulness for studying the *determinants* of quantities such as risk premia. Endogeniding aggregate risk matters because stabilisation policy (monetary, macroprudential, or fiscal) interacts differently with aggregate shocks of granular origin than with ''manna-from-heaven'' TFP shocks.
+  - **Advocacy for Granular Models:** Highlights that large N-player games (à la Gabaix, 2011) provide microfoundations for *endogenous* aggregate risk, making them ideal for modelling the firm or financial sector.
+  - **Computational Evaluation:** Shows that naive Physics-Informed Neural Networks (PINNs) struggle with diffusion control problems and advocates for more robust actor-critic methods
+- **Implications:** Provides a clear guide for future research involving deep learning in order to successfully endogenise aggregate risk in e.g. macro-finance models.
