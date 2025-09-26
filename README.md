@@ -17,7 +17,7 @@ Together, they argue that a granular understanding of heterogeneous investors is
 
 ### 1. Demand-based Asset Pricing: The Limits of Characteristics and the Latent Demand Puzzle
 
-**Folder:** `Demand-based-asset-pricing`
+**Folder:** `Demand-based asset pricing`
 
 This project revisits the demand-based asset pricing framework of Koijen & Yogo (2019). While their work establishes that demand is a key driver of stock return volatility, it leaves the economic origins of this demand unexplained.
 
@@ -34,7 +34,7 @@ This project revisits the demand-based asset pricing framework of Koijen & Yogo 
 
 ### 2. The Trouble with Heterogeneity: A Guide for Models in Macroeconomics and Finance
 
-**Folder:** `Trouble-with-Heterogeneity`
+**Folder:** `Trouble with Heterogeneity`
 
 This project examines how heterogeneity is vital for models in macroeconomics & finance, describes the limitations of current state-of-the-art models in this area and outlines a roadmap for future research on improving models in macroeconomics & finance.  
 
