@@ -1,42 +1,68 @@
-# PINN for the Merton Model
+# Physics-Informed Neural Network for Merton's Portfolio Choice Problem
 
-This repository implements a **Physics-Informed Neural Network (PINN)** to solve the **Merton portfolio optimization problem**, an influential model in financial economics. The code is written in Python using PyTorch and compares PINN-based solutions with known analytical benchmarks.
+A PyTorch implementation of a Physics-Informed Neural Network (PINN) to solve Merton's continuous-time portfolio optimization problem. This repository demonstrates how neural networks can learn the value function and optimal policies for stochastic control problems by directly incorporating the Hamilton-Jacobi-Bellman (HJB) equation into the training process.
 
----
+## 📋 Overview
 
-## ✨ Overview
+Merton's portfolio problem is a classic problem in financial economics that involves optimal allocation between a risky asset and a risk-free asset over time. This project solves the problem using a PINN approach that:
 
-The Merton model describes optimal consumption and portfolio choice under uncertainty. Instead of solving its Hamilton–Jacobi–Bellman (HJB) PDE analytically, this project uses a **PINN** to approximate the value function and derive optimal controls:
+- **Learns the value function** directly from the HJB equation
+- **Enforces economic constraints** through penalty terms in the loss function
+- **Provides optimal policies** for consumption and portfolio allocation
+- **Compares PINN solutions** against known analytical solutions
 
-- **Value Function**: Investor’s lifetime utility of consumption/wealth  
-- **Consumption Policy**: Optimal rate of consumption over time  
-- **Portfolio Share**: Optimal risky asset allocation  
+## 🎯 Key Features
 
-The PINN incorporates **economic priors, boundary conditions, and PDE residuals** into the loss function, ensuring solutions respect both the **HJB equation** and **economic constraints**.
+- **ResNet architecture** with skip connections for stable training
+- **Trial solution formulation** for improved boundary behavior
+- **Adaptive learning rate** with warm-up and cosine annealing
+- **Gradient clipping** and L2 regularization for training stability
+- **Automatic differentiation** for precise derivative calculations
+- **Comprehensive visualization** of results and training progress
 
----
+## 🏗️ Architecture
 
-## 📂 Repository Structure
+The neural network implements a 3-layer ResNet architecture:
+- Input dimension: 2 (time `t` and wealth `a`)
+- Hidden layers: 64 neurons each with Tanh activation
+- Dropout for regularization (configurable)
+- Skip connection from input to second hidden layer
+- Optional trial solution modification for shape constraints
 
-- `main.py` (this script): Defines model, training loop, and evaluation  
-- `PINN_Merton_InitialWeights.pth`: Pre-trained initialization weights  
-- `PINN_Merton_FinalWeights.pth`: Saved trained model weights  
-- `.pkl` files: Training history (loss, learning rate)  
+## 📊 Mathematical Formulation
 
-Outputs include PDF plots for value function, consumption, portfolio share, and training dynamics.
+### Merton Model Parameters
+- `ρ`: Subjective discount rate
+- `γ`: Risk aversion coefficient
+- `r`: Risk-free rate
+- `μ`: Risky asset return
+- `σ`: Risky asset volatility
+- `T`: Investment horizon
 
----
+### HJB Equation
+The value function V(t,a) satisfies:
+ρV = max_{c,π} [u(c) + V_t + (r + π(μ-r))a V_a - c V_a + 1/2 π²σ²a² V_aa]
 
-## ⚙️ Key Components
 
-### 1. **Model Setup**
-- Imports **PyTorch**, **NumPy**, and **Matplotlib**.  
-- Enables GPU training if available.  
-- Defines **economic parameters**:  
-  ```python
-  rho = 0.05     # Discount rate
-  gamma = 2.0    # Risk aversion
-  r = 0.02       # Risk-free rate
-  mu = 0.06      # Expected return
-  sigma = 0.2    # Volatility
-  T = 1.0        # Time horizon
+## 🔧 Training Process
+
+### Loss Function Components
+The training minimizes a composite loss function with three key components:
+
+1. **PDE Residual Loss**: Measures how well the network satisfies the HJB equation
+   ```python
+   loss_resid = torch.mean(resid**2)  # where resid = ρV - rhs #PDE loss
+   loss_term = torch.mean((V_term_pred - V_term_true)**2) #terminal loss
+   neg_grad_penalty = torch.mean(torch.relu(-V_a_col)) #Shape violation loss
+   def derivatives(model, t, a):
+    V = model(t, a)  # Forward pass through network
+    # First derivatives
+    V_t = torch.autograd.grad(V, t, grad_outputs=torch.ones_like(V),
+                            create_graph=True, retain_graph=True)[0]
+    V_a = torch.autograd.grad(V, a, grad_outputs=torch.ones_like(V),
+                            create_graph=True, retain_graph=True)[0]
+    # Second derivative
+    V_aa = torch.autograd.grad(V_a, a, grad_outputs=torch.ones_like(V_a),
+                             create_graph=True, retain_graph=True)[0]
+    return V, V_t, V_a, V_aa```
+
