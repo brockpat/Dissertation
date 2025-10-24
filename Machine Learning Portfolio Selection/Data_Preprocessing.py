@@ -283,6 +283,15 @@ chars = chars[~chars['tr_m_sp500_ld1'].isna()]
 del monthly_rets
 
 #==================================================
+#          Excess Market Return Dummys
+#==================================================
+
+chars = (chars
+         .assign(tr_m_sp500_Dummy = lambda df: (df['tr_m_sp500']>0).astype(int))
+         .assign(tr_m_sp500_ld1_Dummy = lambda df: (df['tr_m_sp500_ld1']>0).astype(int))
+         )
+
+#==================================================
 #     Industry Classification (One-Hot Encoding)
 #==================================================
 
@@ -318,6 +327,8 @@ del ff12_dummies
 chars.to_sql(name = 'Factors_processed', con = JKP_Factors, if_exists = 'replace', index = False)
 
 print("Chars Data Complete")
+
+JKP_Factors.close()
 
 #%% Exogenous Wealth (AUM) Evolution
 """
