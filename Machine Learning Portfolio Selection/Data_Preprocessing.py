@@ -72,6 +72,8 @@ print("Market Return Loaded.")
 #Connect to Database
 JKP_Factors = sqlite3.connect(database=path +"Data/JKP_US_SP500.db")
 
+df = pd.read_sql_query("SELECT * from RFF_hp", con = JKP_Factors)
+
 #List of Stock Features
 features = get_features(exclude_poor_coverage = True)
 
@@ -189,7 +191,7 @@ chars = (chars
 
 chars = chars.assign(eom_lead = lambda df: df['eom'] + MonthEnd(1))
 lead_ret = (chars
-           .get(['id','eom','tr_m_sp500'])
+           .get(['id','eom', 'tr', 'tr_m_sp500'])
            )
 
 chars = (chars.merge(lead_ret, 
