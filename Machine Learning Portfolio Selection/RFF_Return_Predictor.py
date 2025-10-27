@@ -356,6 +356,8 @@ rff_hp.to_sql(name = 'RFF_hp', con = JKP_Factors, if_exists = 'append', index = 
 
 rff_best_hp = rff_hp.loc[rff_hp.groupby('trade_date')['R2'].idxmax()]
 
+#Close Database
+JKP_Factors.close()
 
 """
 To test the Virtue of Complexity, I can set sigma = 0.5 fix (as in their paper) and then for a fix
