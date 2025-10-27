@@ -135,6 +135,7 @@ def rff_Ridge_estimation(ZZ, Z, y, penalty:float):
         ridge_penalty[0, 0] = 0.0  # Don't regularize the intercept
         beta = np.linalg.solve(ZZ + ridge_penalty, Z.T @ y)
     else: #dual form
+        print("Here")
         ridge_penalty = penalty * np.eye(n)
         #no setting to zero in dual form
         beta = Z.T @ np.linalg.solve(ZZ + ridge_penalty, y)
@@ -356,10 +357,7 @@ rff_hp.to_sql(name = 'RFF_hp', con = JKP_Factors, if_exists = 'append', index = 
 rff_best_hp = rff_hp.loc[rff_hp.groupby('trade_date')['R2'].idxmax()]
 
 
-
-hyperparameters:dict = settings['RFF']
-date_id:str = 'eom'
-start_trade_date = settings['rolling_window']['trading_month']
-window_size:int = settings['rolling_window']['window_size']
-validation_periods:int = settings['rolling_window']['validation_periods']
-tuning_folds:int = settings['rolling_window']['tuning_fold']
+"""
+To test the Virtue of Complexity, I can set sigma = 0.5 fix (as in their paper) and then for a fix
+p and lambda combination try to replicate their plots
+"""
