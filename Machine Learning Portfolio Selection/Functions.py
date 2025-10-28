@@ -12,7 +12,8 @@ import numpy as np
 settings = {'rolling_window':{'validation_periods':6, #6 months
                                  'window_size':3*12,  #3 years
                                  'trading_month': pd.to_datetime('2004-01-31'), #Dates onwards must be fully out of sample
-                                 'tuning_fold': 1 # = 1 implies only the last window_size + validation_periods are used for cross-validation of the hyperparameters
+                                 'tuning_fold': 1, # = 1 implies only the last window_size + validation_periods are used for cross-validation of the hyperparameters
+                                 'trading_end': pd.to_datetime('2024-11-30') #Last trading period
                                  },
                'RFF': {'p_vec':np.array([2**i for i in range(6,14)]),
                        'sigma_vec': np.array([0.5,1,10,50]),
@@ -225,6 +226,58 @@ def wealth_func(wealth_end, end, market, risk_free):
     result = result.sort_values("eom").reset_index(drop=True)
 
     return result
+
+def create_cov(x, ids=None):
+    """
+    Create the Barra Covariance Matrix 
+    
+    Parameters:
+    x (dict): Dictionary containing 'fct_load', 'ivol_vec', and 'fct_cov'
+    ids (array-like, optional): List of Stock IDs to subset the data
+    
+    Returns:
+    numpy.ndarray: The computed covariance matrix
+    """
+    ################## Compute the Covariance Matrix ##########################
+    # Extract the relevant loadings and ivol
+    if ids is None:
+        load = x['fct_load']
+        ivol = x['ivol_vec']
+    else:
+        # Convert ids to strings to match R's behavior with as.character()
+        load = x['fct_load'].loc[[i for i in ids]]
+        ivol = x['ivol_vec'].loc[[i for i in ids]]
+    
+    # Create the covariance matrix
+    sigma = load @ x['fct_cov'] @ load.T + np.diag(ivol) 
+    
+    ################## Error Correction ##########################
+    """
+    In case a stock variance is negative. Can happen as (37) is not exactly an
+    equality. Due to the EWMA the residuals are not uncorrelated with the fitted values.
+    """
+    if min(np.diag(sigma)) < 0:
+        # Get diagonal indices
+        diag_indices = np.arange(len(sigma))
+        print("Warning: Negative Variances:", diag_indices)
+        
+        """
+        # Extract the diagonal
+        diag_values = sigma.values[diag_indices, diag_indices]
+        
+        # Find the minimum of the positive diagonal values and use them to replac ethe negatives
+        positive_diag = diag_values[diag_values > 0]
+        if len(positive_diag) > 0:
+            min_positive = positive_diag.min()
+        
+            # Create a boolean mask where diagonal elements are zero
+            mask = diag_values < 0
+        
+            # Replace zero diagonal elements with min_positive
+            sigma.values[diag_indices[mask], diag_indices[mask]] = min_positive
+        """
+            
+    return sigma
 
 #%%
 
