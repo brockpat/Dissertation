@@ -1,13 +1,29 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- 
 """
 Created on Sun Oct 26 14:13:11 2025
 
 @author: patrick
+
+Begin of period variables are known at the beginning of time 't'. This implies
+that they are computed from information from t-1,t-2,...
+
+The following variables are beginn of period:
+
+'pi'
+'wealth' (AUM) 
+
+'Sigma' (Barra Cov)
+
+'gp1' 
+
+'lambda' (Kyle's Lambda)
+
+All other variables are at the end of the period (month).
 """
 
 #%% Libraries
 
-path = "C:/Users/pf122/Desktop/Uni/Frankfurt/2023-24/Machine Learning/Single Authored/"
+path = "C:/Users/patri/Desktop/ML/"
 
 #DataFrame Libraries
 import pandas as pd
@@ -43,7 +59,7 @@ JKP_Factors = sqlite3.connect(database=path +"Data/JKP_US_SP500.db")
 trading_start, trading_end = settings['rolling_window']['trading_month'], settings['rolling_window']['trading_end']
 trading_dates = trading_dates = pd.date_range(start=trading_start,
                                               end=trading_end,
-                                              freq='M'
+                                              freq='ME'
                                               )
 
 #Get Data
@@ -70,32 +86,29 @@ df_wealth = (pd.read_csv(path + "Data/wealth_evolution.csv", parse_dates = ['eom
              )
 
 #Compute initial value weighted portfolio
-df_pf_weights = (df_pf_weights
+df_pf_weights = (
+    df_pf_weights
     # 1. Filter rows where 'eom' is the target date or later
     .pipe(lambda df: df.loc[df['eom'] >= trading_start - pd.offsets.MonthEnd(1)])
     # 2. Calculate the aggregate market cap per date
     .assign(group_sum=lambda df: df.groupby('eom')['me'].transform('sum'))
-    # 3. Calculate a value weighted initial portfolio
-    .assign(pi_stock=lambda df: df['me'] / df['group_sum'])
-    # 4. Zero all portfolio weights for the trading period
-    .assign(pi_stock=lambda df: np.where(df['eom'] == trading_start - pd.offsets.MonthEnd(1), df['pi_stock'], 0))
-    .assign(pi_choice = 0)
-    .assign(tc = 0)
-    .assign(rev = 0)
-    .merge(df_wealth[['eom','mu', 'wealth']], on = ['eom'], how = 'left')
-    # 5. Calculate 'g'
+    # 3. Calculate a value-weighted initial portfolio
+    .assign(pi=lambda df: df['me'] / df['group_sum'])
+    # 4. Set all portfolio weights to zero if 'eom' > min_date
+    .assign(pi=lambda df: np.where(df['eom'] > df['eom'].min(), 0, df['pi']))
+    .merge(df_wealth[['eom', 'mu', 'wealth']], on=['eom'], how='left')
+    # 6. Calculate 'g_{t+1}'
     .assign(
-        # Identify the minimum 'eom' date
         is_min_eom=lambda df: df['eom'] == df['eom'].min(),
-        # Calculate g
-        g=lambda df: np.where(
+        gp1=lambda df: np.where(
             df['is_min_eom'],
             1,
             (1 + df['tr']) / (1 + df['mu'])
         )
-        ) # 5. Clean up
-    .drop(columns=['group_sum', 'is_min_eom'])
     )
+    # 7. Clean up
+    .drop(columns=['group_sum', 'is_min_eom'])
+)
 
 #Read in Barra Covarince matrix
 with open(path + '/Data/Barra_Cov.pkl', "rb") as dict_barra:
@@ -110,39 +123,22 @@ dict_barra = {
 
 #%%
 
-def portfolio_return_BFGS(logits_active, pi_stock, Sigma, KL, wealth, return_predictions, active_idx,
-                          scaling_coef):
+def portfolio_return_BFGS(logits, pi_tm1, gt, Sigma, KL, wealth, return_predictions, scaling_coef):
         
-    logits_stable = logits_active/scaling_coef
-    weights_active = np.exp(logits_stable)
-    weights_active /= np.sum(weights_active)
-    
-    pi = np.zeros_like(pi_stock)
-    pi[active_idx] = weights_active
+    pi_t = np.exp(logits)
+    pi_t /= np.sum(pi_t)
     
     #Compute Revenue
-    revenue = pi.T @ return_predictions 
+    revenue = pi_t.T @ return_predictions 
     
     #Compute Variance penalty
-    var_pen = 0.5*pi.T @ Sigma @ pi
+    var_pen = 0.5*pi_t.T @ Sigma @ pi_t
     
     #Compute transaction costs
-    change_pf = pi-pi_stock 
+    change_pf = pi_t-pi_tm1 
     tc = 0.5* wealth * np.sum(KL * change_pf**2)
     
     return -(revenue - tc - var_pen)
-
-def pi_choice(logits_active, pi_stock, active_idx, scaling_coef, ids):
-    logits_stable = logits_active/scaling_coef
-    weights_active = np.exp(logits_stable)
-    weights_active /= np.sum(weights_active)
-    
-    pi = np.zeros_like(pi_stock)
-    pi[active_idx] = weights_active
-    
-    dictionary = {'id': ids, 'w':pi}
-    
-    return pd.DataFrame(dictionary)
 
 for date in trading_dates:
     
@@ -222,7 +218,7 @@ for date in trading_dates:
     #will always exist for stayers & leavers, but not newcomers
     return_predictions = (df_returns
                           .loc[df_returns['eom'] == prev_date]
-                          .get(['id','tr_m_sp500_ld1'])
+                          .get(['id', 'eom','tr_m_sp500_ld1'])
                           )
     zeros.extend([stock for stock in active if stock not in return_predictions['id'].values])
     active = sorted([stock for stock in active if stock not in zeros])
@@ -250,82 +246,69 @@ for date in trading_dates:
 
     
     #==========================================================
-    #   Build portfolio stock (pi_t-1) and choice (pi_t) vector
+    #   Build portfolio vector pi_t-1 and pi_t
     #==========================================================
+        
+    #pi_t-1
+    df_pi_tm1 = (df_pf_weights
+                 .loc[df_pf_weights['eom'] == prev_date]
+                 .get(['id','eom','pi', 'gp1'])
+                 .sort_values(by = 'id')
+                 .reset_index(drop=True)
+                 )
     
-    #---------- portfolio stock pi_t-1  ----------
-    # 1. Stayers (active stocks)
-    # Get portfolio stock of stayers
-    pi_stock = (df_pf_weights
-                #filter date to t-1
-                .loc[df_pf_weights.eom == prev_date]
-                #Filter out leavers
-                .pipe(lambda df: df.loc[df['id'].isin(active)])
-                #get relevant variables
-                .get(['id','w'])
-                )
-    
-    # 2. Newcomers (remaining active stocks)
-    #Add newcomers with zero portfolio weight (no newcomers in df_pf_weights for prev_date)
-    pi_stock = (pd.concat([pi_stock,
-                          pd.DataFrame({'id': [stock for stock in active if stock not in pi_stock.id.values],
-                                        'w': 0.0*len([stock for stock in active if stock not in pi_stock.id.values])
-                                        }
-                                       )
-                          ]
-                         )
-                         .sort_values(by='id')
-                         .reset_index(drop = True)
-                         )
-    
-    #---------- portfolio choice pi_t ----------
-    pi_choice = (pi_stock
-              .assign(logits = lambda df: np.log(df['w']))
-                  .get(['id','logits'])
-                  .sort_values(by = 'id')
-                  .reset_index(drop = True)
-                  )
+    #pi_t
+    df_pi_t = (pd.DataFrame({'id': list(stayers+newcomers+leavers),
+                            'eom':date,
+                            'pi':np.array(0)})
+               .sort_values(by = 'id')
+               .reset_index(drop=True)
+               )
     
     #==========================================================
     #           Solve for optimal portfolio vector
     #==========================================================
     
-    !!!!
-    HIER MUSS ICH gt pi_{t-1} jetzt inkorporieren und prinzipiell nochmal checken,
-    dass mein portfolio choice auch wirklich richtig formuliert ist
-    !!!!
-    logits_BFGS = minimize(portfolio_return_BFGS, logits_active.to_numpy(),
-                           args = (pi_stock['w'].to_numpy(),
-                                   Sigma.to_numpy(),
-                                   kyles_lambda['lambda'].to_numpy(),
-                                   df_wealth[df_wealth['eom'] == prev_date]['wealth'].iloc[0],
-                                   return_predictions['tr_m_sp500_ld1'].to_numpy(),
-                                   active_idx,
-                                   np.sqrt(len(logits_active))
-                                   ),
-                           method='BFGS', options={'maxiter': 100, 'gtol': 1e-8}
+    #Get the portfolio weights that can be actively chosen
+    df_pi_t_choice = df_pi_t.loc[df_pi_t['id'].isin(active)]
+    
+    #Initialise active portfolio weights with pi_{t-1}
+    df_pi_t_choice = (df_pi_t_choice
+                      .drop(columns = 'pi')
+                      .merge(df_pi_tm1[['id','pi']], on = ['id'], how = 'left',
+                      suffixes = ("",""))
+                      )
+    
+    #Get logits as BFGS solver uses softmax
+    df_pi_t_choice = (df_pi_t_choice
+                      .assign(logits = lambda df: np.log(df['pi']))
+                      .sort_values(by = 'id')
+                      )
+    
+    #BFGS to maximise objective function
+    logits_BFGS = minimize(portfolio_return_BFGS, df_pi_t_choice['logits'].to_numpy(),
+                           args = (df_pi_tm1[df_pi_tm1['id'].isin(active)]['pi'].to_numpy(), 
+                                df_pi_tm1['gp1'].to_numpy(), 
+                                Sigma.to_numpy(), 
+                                kyles_lambda['lambda'].to_numpy(), 
+                                df_wealth.loc[df_wealth['eom'] == date]['wealth'].to_numpy(), 
+                                return_predictions['tr_m_sp500_ld1'].to_numpy(), 
+                                np.sqrt(len(df_pi_t_choice['logits'].to_numpy()))),
+                           method='BFGS', options={'maxiter': 300, 'gtol': 1e-8}
                            )
     
-    #Get optimal portfolio weights
-    pi_opt = pi_choice(logits_BFGS.x, pi_stock['w'].to_numpy(), active_idx, 
-                   np.sqrt(len(logits_active)), pi_stock['id'].to_numpy()
-                   )
-    pi_choice['w_choice'] = softmax pi_opt['logits']
-    pi_choice['eom'] = prev_date
-    df_pf_weights = df_pf_weights.merge(pi_choice, on = ['id', 'eom'], how = 'left')
+    #Extract optimal portfolio weights
+    df_pi_t_choice['logits'] = logits_BFGS.x 
+    df_pi_t_choice['pi'] = np.exp(df_pi_t_choice['logits'] )/(np.exp(df_pi_t_choice['logits'] ).sum())
     
-    #Update Portfolio weights given their returns
-    gt = (
-        (df_returns.loc[(df_returns['eom'] == prev_date) 
-                        & 
-                        df_returns['id'].isin(leavers + stayers + newcomers)
-                        ]
-         .sort_values(by = 'id')
-         .get(['tr_ld1'])
-         )
-        /
-        df_wealth.loc[df_wealth['eom'] == prev_date].get(['mu_ld1']).to_numpy()
-        )
+    #Save to DataFrame
+    df_pf_weights = (
+        df_pf_weights
+        .merge(df_pi_t_choice[['id', 'eom', 'pi']], on=['id', 'eom'], how='outer', suffixes=('', '_new'))
+        .assign(pi=lambda df: df['pi_new'].combine_first(df['pi']))
+        .drop(columns=['pi_new'])
+    )
+
     
 
 
