@@ -49,7 +49,7 @@ print("Risk-free Rate Data Complete.")
 """
 Load Market Return Data
 
-Data Source: #https://www.dropbox.com/scl/fo/zxha6i1zcjzx8a3mb2372/AN9kkos5H5UjjXUOqW3EuDs?rlkey=i3wkvrjbadft6hld863571dol&e=1&dl=0
+Data Source:https://www.dropbox.com/scl/fo/zxha6i1zcjzx8a3mb2372/AN9kkos5H5UjjXUOqW3EuDs?rlkey=i3wkvrjbadft6hld863571dol&e=1&dl=0
 taken from: https://github.com/theisij/ml-and-the-implementable-efficient-frontier/tree/main?tab=readme-ov-file
 """
 # Read in market returns data.
@@ -61,6 +61,13 @@ market = (pd.read_csv(path + "Data/market_returns.csv", dtype={"eom": str})
           #Get relevant columns
           .get(["eom_ret", "mkt_vw_exc"])
           )
+
+df_market_return = (market
+                    .merge(risk_free, left_on = ['eom_ret'], right_on = ['eom'],
+                                how = 'left')
+                    .assign(mkt_vw = lambda df: df['mkt_vw_exc'] + df['rf'])
+                    .drop(['eom'], axis = 1)
+                    )
 print("Market Return Loaded.")
 
 #%% Stock Factors
@@ -214,6 +221,8 @@ If a stock leaves the S&P500, next month's return is no longer in the dataset.
 This incurs a look-ahead bias such that at time t we'd know that in the next
 month the stock is no longer in the S&P500. These leaded returns are filled
 with the CRSP monthly dataset containing more than just the S&P 500.
+
+If no lead return exists, then the stock is dropped from the investable universe.
 """
 
 # Filter Permnos
@@ -339,9 +348,14 @@ exogenous evolution of wealth according to the market return.
 
 Using JKMP22 Equation (5), this wealth is used to update the portfolio weights, i.e.
 g_t \pi_{t-1} is the initial portfolio weight in time period t.
+
+wealth is beginning of period, market return mu is end of period
 """
 #Get the Wealth Evolution 
-wealth = wealth_func(5e11, chars.eom.max(), market, risk_free)
+wealth = (wealth_func(5e11, chars.eom.max(), market, risk_free)
+          .assign(eom = lambda df: pd.to_datetime(df['eom']))
+          )
+
 
 wealth.to_csv(path + "Data/wealth_evolution.csv", index=False)
 print("Wealth Evolution Complete.")
