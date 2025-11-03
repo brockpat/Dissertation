@@ -214,12 +214,12 @@ def wealth_func(wealth_end, end, market, risk_free):
 
     # Final output formatting
     wealth["eom"] = (wealth["eom_ret"].dt.to_period("M").dt.to_timestamp("M") - pd.offsets.MonthEnd(1))
-    wealth["mu_ld1"] = wealth["tret"]
+    wealth["mu"] = wealth["tret"]
 
-    result = wealth[["eom", "wealth", "mu_ld1"]].copy()
+    result = wealth[["eom", "wealth", "mu"]].copy()
 
     # Add one row for the exact 'end' date
-    row = pd.DataFrame([{"eom": end, "wealth": wealth_end, "mu_ld1": np.nan}])
+    row = pd.DataFrame([{"eom": end, "wealth": wealth_end, "mu": np.nan}])
     result = pd.concat([result, row], ignore_index=True)
 
     # Sort chronologically
