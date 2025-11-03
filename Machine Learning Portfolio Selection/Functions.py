@@ -18,7 +18,8 @@ settings = {'rolling_window':{'validation_periods':6, #6 months
                'RFF': {'p_vec':np.array([2**i for i in range(6,14)]),
                        'sigma_vec': np.array([0.5,1,10,50]),
                        'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1_000, 10_000, 100_000])
-                       }
+                       },
+               'gamma': 1.0
                }
 
 #%%
@@ -394,3 +395,22 @@ def categorize_sic(sic):
     # Other
     else:
         return "Other"
+    
+#%%
+def portfolio_return_BFGS(logits, pi_tm1, gt, Sigma, KL, wealth, return_predictions, gamma):
+    
+    #Get current portfolio (in levels)
+    pi_t = np.exp(logits)
+    pi_t /= np.sum(pi_t)
+    
+    #Compute Revenue
+    revenue = pi_t.T @ return_predictions 
+    
+    #Compute Variance penalty
+    var_pen = gamma/2 * pi_t.T @ Sigma @ pi_t
+    
+    #Compute transaction costs
+    change_pf = pi_t-pi_tm1 
+    tc = 0.5* wealth * np.sum(KL * change_pf**2)
+    
+    return -(revenue - tc - var_pen)

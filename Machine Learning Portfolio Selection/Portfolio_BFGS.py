@@ -14,7 +14,7 @@ The following variables are beginn of period:
 
 'Sigma' (Barra Cov)
 
-'gp1' 
+'g' 
 
 'lambda' (Kyle's Lambda)
 
@@ -23,7 +23,7 @@ All other variables are at the end of the period (month).
 
 #%% Libraries
 
-path = "C:/Users/patri/Desktop/ML/"
+path = "C:/Users/pf122/Desktop/Uni/Frankfurt/2023-24/Machine Learning/Single Authored/"
 
 #DataFrame Libraries
 import pandas as pd
@@ -50,6 +50,10 @@ from scipy.optimize import minimize
 
 import pickle
 
+import torch
+import torch.nn.functional as F
+
+Gradient_Ascent = True  #Else BFGS
 
 #%% Read in Data
 #Connect to DataBase
@@ -59,7 +63,7 @@ JKP_Factors = sqlite3.connect(database=path +"Data/JKP_US_SP500.db")
 trading_start, trading_end = settings['rolling_window']['trading_month'], settings['rolling_window']['trading_end']
 trading_dates = trading_dates = pd.date_range(start=trading_start,
                                               end=trading_end,
-                                              freq='ME'
+                                              freq='M'
                                               )
 
 #Get Data
@@ -96,18 +100,18 @@ df_pf_weights = (
     .assign(pi=lambda df: df['me'] / df['group_sum'])
     # 4. Set all portfolio weights to zero if 'eom' > min_date
     .assign(pi=lambda df: np.where(df['eom'] > df['eom'].min(), 0, df['pi']))
-    .merge(df_wealth[['eom', 'mu', 'wealth']], on=['eom'], how='left')
+    .merge(df_wealth[['eom', 'mu']], on=['eom'], how='left')
     # 6. Calculate 'g_{t+1}'
     .assign(
         is_min_eom=lambda df: df['eom'] == df['eom'].min(),
-        gp1=lambda df: np.where(
+        g=lambda df: np.where(
             df['is_min_eom'],
             1,
             (1 + df['tr']) / (1 + df['mu'])
         )
     )
     # 7. Clean up
-    .drop(columns=['group_sum', 'is_min_eom'])
+    .drop(columns=['group_sum', 'is_min_eom', 'mu'])
 )
 
 #Read in Barra Covarince matrix
@@ -121,25 +125,14 @@ dict_barra = {
     if key >= trading_start - pd.offsets.MonthEnd(1)  # The condition to KEEP the entry: date_key is NOT less than value
 }
 
-#%%
+#%% Compute Optimal Portfolio
 
-def portfolio_return_BFGS(logits, pi_tm1, gt, Sigma, KL, wealth, return_predictions, scaling_coef):
-        
-    pi_t = np.exp(logits)
-    pi_t /= np.sum(pi_t)
-    
-    #Compute Revenue
-    revenue = pi_t.T @ return_predictions 
-    
-    #Compute Variance penalty
-    var_pen = 0.5*pi_t.T @ Sigma @ pi_t
-    
-    #Compute transaction costs
-    change_pf = pi_t-pi_tm1 
-    tc = 0.5* wealth * np.sum(KL * change_pf**2)
-    
-    return -(revenue - tc - var_pen)
+df_strategy = pd.DataFrame({'eom': trading_dates[0] - pd.offsets.MonthEnd(1),
+                            'revenue': 0.0,
+                            'tc': 0.0},
+                           index=[0])
 
+#Loop over trading date
 for date in trading_dates:
     
     #=====================================
@@ -243,7 +236,6 @@ for date in trading_dates:
                           .sort_values(by = 'id')
                           .reset_index(drop=True)
                           )
-
     
     #==========================================================
     #   Build portfolio vector pi_t-1 and pi_t
@@ -252,7 +244,8 @@ for date in trading_dates:
     #pi_t-1
     df_pi_tm1 = (df_pf_weights
                  .loc[df_pf_weights['eom'] == prev_date]
-                 .get(['id','eom','pi', 'gp1'])
+                 .get(['id','eom','pi', 'g'])
+                 .assign(pi_g = lambda df: df['pi']*df['g'])
                  .sort_values(by = 'id')
                  .reset_index(drop=True)
                  )
@@ -260,7 +253,11 @@ for date in trading_dates:
     #pi_t
     df_pi_t = (pd.DataFrame({'id': list(stayers+newcomers+leavers),
                             'eom':date,
-                            'pi':np.array(0)})
+                            'pi':np.array(0),
+                            'rev': np.array(0),
+                            'tc': np.array(0)})
+               .merge(df_pi_tm1[['id','pi_g']], on = 'id', how = 'left')
+               .fillna(0)
                .sort_values(by = 'id')
                .reset_index(drop=True)
                )
@@ -269,34 +266,96 @@ for date in trading_dates:
     #           Solve for optimal portfolio vector
     #==========================================================
     
+    #---------------- Auxiliary Objects ----------------
     #Get the portfolio weights that can be actively chosen
     df_pi_t_choice = df_pi_t.loc[df_pi_t['id'].isin(active)]
     
     #Initialise active portfolio weights with pi_{t-1}
+    """
+    NEED A STRATEGY TO INITIALISE PI FOR NEWCOMERS AS LOGIT OF -INF IS NOT POSSIBLE
+    """
     df_pi_t_choice = (df_pi_t_choice
                       .drop(columns = 'pi')
                       .merge(df_pi_tm1[['id','pi']], on = ['id'], how = 'left',
-                      suffixes = ("",""))
-                      )
-    
-    #Get logits as BFGS solver uses softmax
-    df_pi_t_choice = (df_pi_t_choice
+                             suffixes = ("","")
+                             )
+                      #Get logits
                       .assign(logits = lambda df: np.log(df['pi']))
                       .sort_values(by = 'id')
                       )
     
-    #BFGS to maximise objective function
-    logits_BFGS = minimize(portfolio_return_BFGS, df_pi_t_choice['logits'].to_numpy(),
-                           args = (df_pi_tm1[df_pi_tm1['id'].isin(active)]['pi'].to_numpy(), 
-                                df_pi_tm1['gp1'].to_numpy(), 
-                                Sigma.to_numpy(), 
-                                kyles_lambda['lambda'].to_numpy(), 
-                                df_wealth.loc[df_wealth['eom'] == date]['wealth'].to_numpy(), 
-                                return_predictions['tr_m_sp500_ld1'].to_numpy(), 
-                                np.sqrt(len(df_pi_t_choice['logits'].to_numpy()))),
-                           method='BFGS', options={'maxiter': 300, 'gtol': 1e-8}
-                           )
+    if Gradient_Ascent: #with Pytorch
+        #--- Define Objects
+        #Return Prediction
+        r = torch.tensor(return_predictions['tr_m_sp500_ld1'])
+        #Covariance Matrix of Returns
+        S = torch.tensor(Sigma.to_numpy())
+        #Diagonal of Kyle's Lambda matrix
+        L_diag = torch.tensor(kyles_lambda['lambda'])
+        #Risk Aversion
+        gamma = torch.tensor(settings['gamma']) 
+        #Wealth
+        w = torch.tensor(df_wealth.loc[df_wealth['eom'] == date]['wealth'].iloc[0])
+        #Previous portfolio (in levels)
+        pi_prev = torch.tensor(df_pi_tm1[df_pi_tm1['id'].isin(active)]['pi_g'].to_numpy())
+        #Initialisec current portfolio (in logits)
+        pi_logits = torch.tensor(df_pi_t_choice['logits'].to_numpy(),
+                                 requires_grad = True)
+        
+        #--- Optimizer
+        optimizer = torch.optim.Adam([pi_logits], lr=1e-2)
+        
+        #--- Gradient Ascent
+        for step in range(500):
+            optimizer.zero_grad()
+        
+            # current portfolio (levels)
+            pi = F.softmax(pi_logits, dim=0)  # shape (n,)
+        
+            # revenue:
+            revenue = torch.dot(r, pi)
+        
+            # var penalty
+            var_penalty = 0.5 * gamma * pi @ S @ pi
+        
+            # transaction costs
+            diff = pi - pi_prev
+            turnover_quad = (L_diag * diff.pow(2)).sum()
+            tc = 0.5 * w * turnover_quad
+        
+            # FULL objective to MAXIMISE
+            F_val = revenue - var_penalty - tc
+        
+            # Adam does minimization -> minimize negative for maximisation
+            loss = -F_val
+            loss.backward()
+            optimizer.step()
+        
+            # (optional) print
+            if step % 100 == 0:
+                print(step, F_val.item())
+        
+        #Save Results
+        df_pi_t_choice['logits'] = pi_logits.detach().cpu().numpy()
+        df_pi_t_choice['pi'] = pi.detach().cpu().numpy()
+        
+    #BFGS
+    else:
+        #BFGS to maximise objective function
+        logits_BFGS = minimize(portfolio_return_BFGS, df_pi_t_choice['logits'].to_numpy(),
+                               args = (df_pi_tm1[df_pi_tm1['id'].isin(active)]['pi'].to_numpy(), 
+                                    df_pi_tm1['g'].to_numpy(), 
+                                    Sigma.to_numpy(), 
+                                    kyles_lambda['lambda'].to_numpy(), 
+                                    df_wealth.loc[df_wealth['eom'] == date]['wealth'].to_numpy(), 
+                                    return_predictions['tr_m_sp500_ld1'].to_numpy(), 
+                                    settings['gamma']),
+                               method='BFGS', options={'maxiter': 300, 'gtol': 1e-8}
+                               )
     
+    """
+    INCLUDE ZEROS HERE TOO
+    """
     #Extract optimal portfolio weights
     df_pi_t_choice['logits'] = logits_BFGS.x 
     df_pi_t_choice['pi'] = np.exp(df_pi_t_choice['logits'] )/(np.exp(df_pi_t_choice['logits'] ).sum())
@@ -308,7 +367,9 @@ for date in trading_dates:
         .assign(pi=lambda df: df['pi_new'].combine_first(df['pi']))
         .drop(columns=['pi_new'])
     )
+    
+    """
+    COMPUTE TRANSACTION COSTS AND REVENUE
+    """
 
     
-
-
