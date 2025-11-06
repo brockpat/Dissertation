@@ -25,7 +25,7 @@ import numpy as np
 
 import os
 os.chdir(path + "Code/")
-from Functions import *
+from General_Functions import *
 
 #%% Read in Risk Free Rate
 """
@@ -179,12 +179,26 @@ chars = (chars
 #          Compute Excess Market Return
 #==================================================
 #Compute S&P 500 Return
-sp500_rets = (chars
-              .groupby('eom')[['tr','me']]
-              .apply(lambda x: np.average(x.tr, weights = x.me))
+
+#Lag Market Equity (i.e. begin of month market equity)
+sp500_rets = chars.get(['id','eom','me','tr'])
+sp500_rets = sp500_rets.assign(eom_lead = lambda df: df['eom'] + pd.offsets.MonthEnd(1))
+sp500_rets = (sp500_rets.merge(sp500_rets[['id','eom_lead','me']],
+                              left_on = ['eom','id'], right_on = ['eom_lead','id'],
+                              how = 'left',
+                              suffixes = ("","_lag"))
+                              .drop(columns = ['eom_lead', 'eom_lead_lag'])
+                              .dropna()
+                              )
+#Compute market return over the month
+sp500_rets = (sp500_rets
+              .groupby('eom')[['tr','me_lag']]
+              .apply(lambda x: np.average(x.tr, weights = x.me_lag))
               .reset_index()
               .rename(columns = {0:'sp500_ret'})
               )
+
+sp500_rets.to_sql(name = 'SP500_Return', con = JKP_Factors, if_exists = 'replace', index = False)
 
 #Compute Excess market return (tr_m_sp500)
 chars = (chars

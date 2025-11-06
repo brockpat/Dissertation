@@ -23,7 +23,7 @@ All other variables are at the end of the period (month).
 
 #%% Libraries
 
-path = "C:/Users/pf122/Desktop/Uni/Frankfurt/2023-24/Machine Learning/Single Authored/"
+path = "C:/Users/patri/Desktop/ML/"
 
 #DataFrame Libraries
 import pandas as pd
@@ -73,6 +73,10 @@ df_strategy = []
 
 #Loop over trading date
 for date in trading_dates:
+    print(date)
+    #if date == pd.to_datetime('2008-01-31'):
+    #    print("BREAK")
+    #    break
     
     #=====================================
     #             Preliminaries
@@ -160,8 +164,14 @@ for date in trading_dates:
     df_t = df_t.merge(df_kl.loc[df_kl['eom'] == prev_date, 
                                 ['id','lambda']], on='id', how='left')
     
+    #Set it to zero for newcomers who don't have a value for KL (these newcomers are not in active)
+    df_t.loc[(df_t['id'].isin(set(newcomers).intersection(set(zeros)))) 
+             & 
+             (df_t['lambda'].isna()), 'lambda'] = 0
+        
     if df_t['lambda'].isna().sum() > 0:
         print("ERROR: A stock does not have a value for Kyle's Lambda")
+        #break
         
     #---- Get actual stock's return ----
     #Merge values
@@ -173,6 +183,7 @@ for date in trading_dates:
     
     if df_t['tr'].isna().sum() > 0:
         print("ERROR: A stock does not have an observed end-of-period return")
+        #break
     
     #---- Compute G @ pi_{t-1} ----
     # Compute pi_g for the previous date
@@ -197,6 +208,7 @@ for date in trading_dates:
     #---- Initialise 'pi_t' with 'pi_g_tm1' ----
     df_t.loc[df_t['id'].isin(active), 'pi'] = df_t.loc[df_t['id'].isin(active), 'pi_g_tm1']
 
+    print(f"   MAX pi: {df_t['pi'].max()}")
 
     #==========================================================
     #           Solve for optimal portfolio vector
@@ -223,6 +235,12 @@ for date in trading_dates:
         #--- Optimizer
         optimizer = torch.optim.Adam([pi_logits], lr=1e-2)
         
+        #--- Define Constraint Parameters ---
+        max_weight = 0.1
+        # This is a new hyperparameter you may need to tune.
+        # A higher value enforces the constraint more strictly.
+        penalty_weight = 1000.0
+        
         #--- Gradient Ascent
         for step in range(500):
             optimizer.zero_grad()
@@ -244,14 +262,29 @@ for date in trading_dates:
             # FULL objective to MAXIMISE
             F_val = revenue - var_penalty - tc
         
+            #--- NEW: Calculate Constraint Penalty ---
+            # 1. Find the amount each weight is *over* the cap
+            #    torch.relu ensures this is 0 for weights <= 0.1
+            weight_violation = torch.relu(pi - max_weight)
+            
+            # 2. Calculate the penalty (e.g., quadratic penalty)
+            #    We sum the squared violations
+            constraint_penalty = (penalty_weight * weight_violation).sum()
+
+            #--- NEW: Add penalty to the loss ---
             # Adam does minimization -> minimize negative for maximisation
-            loss = -F_val
+            # We ADD the penalty to the loss, so the optimizer
+            # minimizes it (i.e., avoids violating the constraint)
+            loss = -F_val + constraint_penalty
+
             loss.backward()
             optimizer.step()
         
             # (optional) print
-            if step % 100 == 0:
-                print(step, F_val.item())
+            #if step % 100 == 0:
+            #    print(step, F_val.item())
+        print(f"  Results: {F_val.item()}")
+        print(f"  Penalty: {constraint_penalty}")
         
         #Save Results
         df_t.loc[df_t['id'].isin(active), 'pi'] = pi.detach().cpu().numpy()
@@ -270,12 +303,10 @@ for date in trading_dates:
         #Append Result
         df_strategy.append(df_t)
         
+df_profit = results.groupby('eom').apply(lambda df: df['rev'] - df['tc'])   
         
         
-        
-        
-        
-        
+I HAVE TO COMPARE PROFIT WITH THE S&P 500 MARKET RETURN
         
         
         
