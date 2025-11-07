@@ -26,7 +26,7 @@ import numpy as np
 
 import os
 os.chdir(path + "Code/")
-from Functions import *
+from General_Functions import *
 
 import scipy.stats
 
@@ -60,8 +60,53 @@ def rff_weights(signals:list, hyperparameters:dict, seed = 2025):
     
     return base_W
 
+def rff_Ridge_Z(df, sigma:float, p:int, base_W):
+    """
+    Computes the matrix of RFFs (no constant). Outputs matrix and
+    column-wise de-meaned matrix.
+    
+    Parameters
+    ----------
+    df : TYPE
+        DESCRIPTION.
+    sigma : float
+        DESCRIPTION.
+    p : int
+        DESCRIPTION.
+    base_W : TYPE
+        DESCRIPTION.
+
+    Returns
+    -------
+    Z : TYPE
+        DESCRIPTION.
+    Z_DeMean : TYPE
+        DESCRIPTION.
+
+    """
+    #Scale the variance of the omega weights
+    W = (base_W / sigma)[:,:p]
+    
+    #Extract the values of the signals
+    X = df.to_numpy()  # shape: (n, num_signals)
+    
+    #Compute the inner products omega'x
+    proj = X @ W                    # (n, p/2)
+    
+    #Compute the RFFs. Do not include a constant. De-mean independent and dependent
+    #   variable so that no constant must be included (this means the primal and dual
+    #   form  can be used)
+    Z =  np.hstack([np.sqrt(1 / (p//2)) * np.cos(proj), 
+                    np.sqrt(1 / (p//2)) * np.sin(proj)])
+    
+    Z_mean = np.mean(Z, axis=0)
+    Z_DeMean = Z - Z_mean
+    
+    return Z, Z_DeMean
+    
+
 #Compute explanatory variable matrix
-def rff_Ridge_ZZ(df, sigma:float, p:int, base_W):
+def rff_Ridge_ZZ(Z):
     """
     Parameters
     ----------
@@ -81,28 +126,13 @@ def rff_Ridge_ZZ(df, sigma:float, p:int, base_W):
     relevant matrices that are used in the Ridge Regression.
 
     """
-    #Scale the variance of the omega weights
-    W = (base_W / sigma)[:,:p]
-    
-    #Extract the values of the signals
-    X = df.to_numpy()  # shape: (n, num_signals)
-    
-    #Compute the inner products omega'x
-    proj = X @ W                    # (n, p/2)
-    
-    #Compute the RFFs and include a constant
-    Z =  np.hstack([np.ones((proj.shape[0], 1)), #Include a constant
-                    np.sqrt(1 / (p//2)) * np.cos(proj), 
-                    np.sqrt(1 / (p//2)) * np.sin(proj)])
-    
-    #No. Obs, No. Features
     n, p = Z.shape
     
     #Output the relevant matrices for the Ridge regression estimator computation
     if n > p: #primal form
-        return Z.T@Z, Z
+        return Z.T@Z
     else:  #dual form
-        return Z @ Z.T, Z
+        return Z @ Z.T
 
 #Compute the Ridge regression estimator
 def rff_Ridge_estimation(ZZ, Z, y, penalty:float):
@@ -129,16 +159,26 @@ def rff_Ridge_estimation(ZZ, Z, y, penalty:float):
     #No. Obs, No. Features
     n, p = Z.shape
     
+    y_mean = y.mean() 
+    y_DeMean = y - y_mean
+    
+    Z_mean = np.mean(Z, axis=0)
+    Z = Z - Z_mean
+    
     #Compute the Ridge regression estimator
     if n > p: #primal form
         ridge_penalty = penalty * np.eye(p)
-        ridge_penalty[0, 0] = 0.0  # Don't regularize the intercept
-        beta = np.linalg.solve(ZZ + ridge_penalty, Z.T @ y)
+        #ridge_penalty[0, 0] = 0.0  # Don't regularize the intercept
+        beta = np.linalg.solve(ZZ + ridge_penalty, Z.T @ y_DeMean)
     else: #dual form
-        print("Here")
         ridge_penalty = penalty * np.eye(n)
         #no setting to zero in dual form
-        beta = Z.T @ np.linalg.solve(ZZ + ridge_penalty, y)
+        beta = Z.T @ np.linalg.solve(ZZ + ridge_penalty, y_DeMean)
+    
+    #Compute (unrestricted) intercept
+    beta_0 = y_mean - (Z_mean @ beta)
+    #Add intercept
+    beta = np.hstack([beta_0, beta])
     
     return beta
 
@@ -172,75 +212,72 @@ def rff_validation(Z_val, val_targets, beta):
     
     return R2
 
-def rff_find_hp(hyperparameters:dict, date_id:str, start_trade_date,
-                window_size:int, validation_periods:int, tuning_folds:int):
+def rff_find_hp(df_signals,hyperparameters:dict, date_id:str, trade_date,
+                window_size:int, validation_periods:int, tuning_folds:int, hp_scores:list):
     
     # Get list of dates
     unique_dates = pd.Series(df_signals[date_id].unique()).sort_values()
-      
-    # Dates where trading starts
-    trade_dates = list(unique_dates[unique_dates >= start_trade_date])
+
+    # All past data strictly before this trading month
+    past_dates = unique_dates[unique_dates < trade_date - pd.offsets.MonthEnd(1)]
     
-    #List to store validation scores
-    hp_scores = []
+    # To create T folds of (window_size -> validation_periods) inside a short lookback,
+    # we need at least: window_size + T*validation_periods months of history.
+    min_needed = window_size + tuning_folds * validation_periods
+    if len(past_dates) < min_needed:
+        # Not enough history to tune and fit
+        return
+    
+    # tuning dates
+    tuning_dates = past_dates[-min_needed:]
+    
+    # Build folds inside this recent window (fixed-length training + next validation)
+    folds = []
+    for i in range(tuning_folds):
+        est_start = i * validation_periods
+        est_end = est_start + window_size
+        val_start = est_end
+        val_end = est_end + validation_periods
 
-    #Loop over trade dates and get past data
-    for trade_date in trade_dates:
-        print(f"Trade Date: {trade_date}")
+        est_dates = tuning_dates[est_start:est_end]
+        val_dates = tuning_dates[val_start:val_end]
+        folds.append((est_dates, val_dates)) #training data, validation data
+    
+    # --- inner rolling CV to pick hyperparameters ---
+    for train_dates, val_dates in folds:
+        train_data = df_signals[df_signals[date_id].isin(train_dates)][signals[0] + signals[1]]
+        train_targets = df_targets[df_targets[date_id].isin(train_dates)]['tr_m_sp500_ld1']
         
-        # All past data strictly before this trading month
-        past_dates = unique_dates[unique_dates < trade_date - pd.offsets.MonthEnd(1)]
+        val_data = df_signals[df_signals[date_id].isin(val_dates)][signals[0] + signals[1]]
+        val_targets = df_targets[df_targets[date_id].isin(val_dates)]['tr_m_sp500_ld1']
         
-        # To create T folds of (window_size -> validation_periods) inside a short lookback,
-        # we need at least: window_size + T*validation_periods months of history.
-        min_needed = window_size + tuning_folds * validation_periods
-        if len(past_dates) < min_needed:
-            # Not enough history to tune and fit
-            continue
         
-        # tuning dates
-        tuning_dates = past_dates[-min_needed:]
-        
-        # Build folds inside this recent window (fixed-length training + next validation)
-        folds = []
-        for i in range(tuning_folds):
-            est_start = i * validation_periods
-            est_end = est_start + window_size
-            val_start = est_end
-            val_end = est_end + validation_periods
+        base_W = rff_weights(signals, hyperparameters)
 
-            est_dates = tuning_dates[est_start:est_end]
-            val_dates = tuning_dates[val_start:val_end]
-            folds.append((est_dates, val_dates)) #training data, validation data
-        
-        # --- inner rolling CV to pick hyperparameters ---
-        for train_dates, val_dates in folds:
-            train_data = df_signals[df_signals[date_id].isin(train_dates)][signals[0] + signals[1]]
-            train_targets = df_targets[df_targets[date_id].isin(train_dates)]['tr_m_sp500_ld1']
-            
-            val_data = df_signals[df_signals[date_id].isin(val_dates)][signals[0] + signals[1]]
-            val_targets = df_targets[df_targets[date_id].isin(val_dates)]['tr_m_sp500_ld1']
-            
-            
-            base_W = rff_weights(signals, hyperparameters)
+        for sigma in hyperparameters['sigma_vec']:
+            print(f"  sigma:{sigma}")
+            for p in hyperparameters['p_vec']:
+                print(f"    p:{p}")
+                Z_train, Z_train_DeMean = rff_Ridge_Z(train_data, sigma, p, base_W)
+                ZZ_DeMean = rff_Ridge_ZZ(Z_train_DeMean)
+                
+                #Validation signals
+                Z_val, _ = rff_Ridge_Z(val_data, sigma, p, base_W)
+                #   Add constant for Z_val
+                Z_val = np.hstack([np.ones((Z_val.shape[0], 1)), Z_val])
 
-            for sigma in hyperparameters['sigma_vec']:
-                print(f"  sigma:{sigma}")
-                for p in hyperparameters['p_vec']:
-                    print(f"    p:{p}")
-                    ZZ,Z = rff_Ridge_ZZ(train_data, sigma, p, base_W)
-                    _, Z_val = rff_Ridge_ZZ(val_data, sigma, p, base_W)
-
-                    for penalty in hyperparameters['penalty_vec']:
-                        print(f"      penalty:{penalty}")
-                        beta = rff_Ridge_estimation(ZZ, Z, train_targets.to_numpy(), penalty)
-                        R2 = rff_validation(Z_val, val_targets, beta)
-                        hp_scores.append({'trade_date':trade_date, 'sigma':sigma, 
-                                          'p':p, 'penalty':penalty, 'R2':R2}) 
-         
+                for penalty in hyperparameters['penalty_vec']:
+                    print(f"      penalty:{penalty}")
+                    beta = rff_Ridge_estimation(ZZ_DeMean, Z_train, 
+                                                train_targets.to_numpy(), 
+                                                penalty)
+                    R2 = rff_validation(Z_val, val_targets, beta)
+                    hp_scores.append({'trade_date':trade_date, 'sigma':sigma, 
+                                      'p':p, 'penalty':penalty, 'R2':R2}) 
+     
     #Return validation metrics for each hyperparameter
-    hp_scores = pd.DataFrame(hp_scores)
-    return hp_scores
+    #hp_scores = pd.DataFrame(hp_scores)
+    return #hp_scores
 
 def rff_forecast_all_dates(df_signals, df_targets, signals, hyperparameters_opt,
                            date_id: str, start_trade_date, window_size: int):
@@ -328,7 +365,7 @@ def rff_forecast_all_dates(df_signals, df_targets, signals, hyperparameters_opt,
     
 #%% 
 #Read in processed characteristics
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_US_SP500.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_SP500.db")
 df_signals = pd.read_sql_query("SELECT * FROM Signals_ZScore", 
                                con = JKP_Factors,
                                parse_dates={'eom'})
@@ -344,17 +381,29 @@ signals:list = get_signals()
 #Fill missing values with 0. Industry Dummys have no missing values
 df_signals[signals[0]] = df_signals[signals[0]].fillna(0)
 
-#Find Optimal Hyperparameters
-rff_hp = rff_find_hp(settings['RFF'], 'eom', settings['rolling_window']['trading_month'],
-                     settings['rolling_window']['window_size'], settings['rolling_window']['validation_periods'],
-                     settings['rolling_window']['tuning_fold'])
+combinations = [[3, 1], [12, 1], [36, 1]]
 
-rff_hp['window_size'] = settings['rolling_window']['window_size']
-rff_hp['validation_periods'] = settings['rolling_window']['validation_periods']
 
-rff_hp.to_sql(name = 'RFF_hp', con = JKP_Factors, if_exists = 'append', index = False)
+trading_dates = pd.date_range(settings['rolling_window']['trading_month'], df_signals.eom.max(), freq = 'ME')
 
-rff_best_hp = rff_hp.loc[rff_hp.groupby('trade_date')['R2'].idxmax()]
+for item in combinations:
+    window_size = item[0]
+    validation_periods = item[1]
+    
+    hp_scores = []
+    #Find Optimal Hyperparameters
+    for date in trading_dates:
+        rff_find_hp(df_signals, settings['RFF'], 'eom', date,
+                    window_size, validation_periods,
+                    settings['rolling_window']['tuning_fold'],
+                    hp_scores)
+    rff_hp = pd.DataFrame(hp_scores)
+    rff_hp['window_size'] = window_size
+    rff_hp['validation_periods'] = validation_periods
+    
+    rff_hp.to_sql(name = 'RFF_hp', con = JKP_Factors, if_exists = 'append', index = False)
+
+#rff_best_hp = rff_hp.loc[rff_hp.groupby('trade_date')['R2'].idxmax()]
 
 #Close Database
 JKP_Factors.close()
