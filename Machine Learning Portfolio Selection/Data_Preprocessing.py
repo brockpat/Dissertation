@@ -6,7 +6,7 @@ Created on Mon Oct 20 15:03:04 2025
 """
 #%% Libraries
 
-path = "C:/Users/pf122/Desktop/Uni/Frankfurt/2023-24/Machine Learning/Single Authored/"
+path = "C:/Users/pbrock/Desktop/ML/"
 
 #DataFrame Libraries
 import pandas as pd
@@ -77,9 +77,9 @@ print("Market Return Loaded.")
 #===================
 
 #Connect to Database
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_US_SP500.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
+CRSP_monthly = sqlite3.connect(database=path +"Data/CRSP_monthly.db")
 
-df = pd.read_sql_query("SELECT * from RFF_hp", con = JKP_Factors)
 
 #List of Stock Features
 features = get_features(exclude_poor_coverage = True)
@@ -95,7 +95,7 @@ for feature in features:
 #   Delete last comma and space to avoid syntax errors
 query_features = query_features[:-2]
 #   Build final query vector
-query = ("SELECT id, eom, sic, ff49, size_grp, me, crsp_exchcd, ret_exc, "
+query = ("SELECT id, eom, sic, ff49, size_grp, me, crsp_exchcd, ret_exc, MthRet, "
          +query_features 
          +" FROM Factors " 
          #+f"WHERE date BETWEEN '{start_date}' AND '{end_date}' "
@@ -109,26 +109,17 @@ chars  = pd.read_sql_query(query,
                            parse_dates={'eom'}
                            )
 
-#Convert features to numeric
-for feature in features:
-    chars[feature] = pd.to_numeric(chars[feature], errors = 'coerce')
-#Convert id to int
-chars['id'] = chars['id'].astype('int64')
-#Convert sic to integer
-chars['sic'] = pd.to_numeric(chars['sic'], errors = 'coerce', downcast='integer')
-#Convert excess return to float
-chars['ret_exc'] = pd.to_numeric(chars['ret_exc'], errors = 'coerce')
-
 #Add additional columns:
 #   dollar volume
 chars["dolvol"] = chars["dolvol_126d"]
 #   Kyle's Lambda (0.1 = price impact)
-chars["lambda"] = 2 / chars["dolvol"] * 0.1  # Price impact for trading 1% of daily volume
+chars["lambda"] = 0.2 / chars["dolvol"]  # Price impact for trading 1% of daily volume
 #   Monthly version of rvol by annualizing daily volatility.
 chars["rvol_m"] = chars["rvol_252d"] * (21 ** 0.5)
 
 #Delete if Return not available
-chars = chars.dropna(subset = 'ret_exc')
+chars = chars.dropna(subset = 'MthRet')
+chars = chars.rename(columns = {'MthRet':'tr'})
 
 #==================================================
 #              Data Screening
@@ -162,6 +153,9 @@ chars = chars[feat_available >= min_feat] #Kick out observations with too many m
 print(f"In total, the final dataset has {round((len(chars) / n_start) * 100, 2)}% of the observations and {round((chars['me'].sum() / me_start) * 100, 2)}% of the market cap in the data")
 
 
+"""
+Legacy Code: No longer required as MthRet merged from CRSP monthly is the total
+return of a stock
 #==================================================
 #               Compute total (raw) Return
 #==================================================
@@ -174,6 +168,7 @@ chars = (chars
             .drop('rf',
                   axis=1)
             )
+"""
 
 #==================================================
 #          Compute Excess Market Return
@@ -198,7 +193,7 @@ sp500_rets = (sp500_rets
               .rename(columns = {0:'sp500_ret'})
               )
 
-sp500_rets.to_sql(name = 'SP500_Return', con = JKP_Factors, if_exists = 'replace', index = False)
+sp500_rets.to_sql(name = 'SP500_Return_BaH', con = JKP_Factors, if_exists = 'replace', index = False)
 
 #Compute Excess market return (tr_m_sp500)
 chars = (chars
@@ -243,44 +238,21 @@ If no lead return exists, then the stock is dropped from the investable universe
 permnos = chars.id.unique()
 permnos = permnos_str = ', '.join(map(str, permnos))
 
-query = ("SELECT PERMNO AS id, MthCalDt AS eom, MthRet AS tr " 
-         "FROM Monthly_Returns "
+query = ("SELECT PERMNO AS id, eom, MthRet AS tr " 
+         "FROM CRSP_Monthly "
         "WHERE "
         f"PERMNO IN ({permnos}) "
-        f"AND MthCalDt BETWEEN '{chars.eom.min()}' AND '{chars.eom.max()}'"
-        #US-listed stocks
-        "AND ShareType = 'NS' "
-        #security type equity
-        "AND SecurityType = 'EQTY' "  
-        #security sub type common stock
-        "AND SecuritySubType = 'COM' "
-        #US Incorporation Flag (Y/N)
-        "AND USIncFlg = 'Y' " 
-        #Issuer is a corporation
-        "AND IssuerType in ('ACOR', 'CORP') " 
-        #NYSE, AMEX, NASDAQ Stocks
-        "AND PrimaryExch in ('N', 'A', 'Q') "
-        #Stock Prices when or after issuence
-        "AND ConditionalType in ('RW', 'NW') "
-        #Actively Traded Stocks
-        "AND TradingStatusFlg = 'A'"
+        f"AND eom BETWEEN '{chars.eom.min()}' AND '{chars.eom.max()}'" 
         )
 
 #Load CRSP monthly Returns
 monthly_rets  = pd.read_sql_query(query, 
-                           con=JKP_Factors,
+                           con=CRSP_monthly,
                            parse_dates={'eom'}
                            )
 
-#Drop Duplicates
-monthly_rets = monthly_rets.drop_duplicates(subset = ['id','eom'])
-
-#Make Date End of Month
-monthly_rets['eom'] = monthly_rets['eom'] + pd.offsets.MonthEnd(0)
-
 #Compute excess market return
 monthly_rets = (monthly_rets
-                .assign(tr = lambda x: pd.to_numeric(x['tr'], errors = 'coerce'))
                 .merge(sp500_rets, on = ['eom'])
                 .assign(tr_m_sp500 = lambda x: x['tr'] - x['sp500_ret'])
                 )
@@ -354,6 +326,7 @@ chars.to_sql(name = 'Factors_processed', con = JKP_Factors, if_exists = 'replace
 print("Chars Data Complete")
 
 JKP_Factors.close()
+CRSP_monthly.close()
 
 #%% Exogenous Wealth (AUM) Evolution
 """

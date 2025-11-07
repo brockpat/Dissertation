@@ -28,11 +28,11 @@ import pandas as pd
 import sqlite3
 
 
-path = "C:/Users/pf122/Desktop/Uni/Frankfurt/2023-24/Machine Learning/Single Authored/"
+path = "C:/Users/pbrock/Desktop/ML/"
 
 #%% SPY S&P 500 Returns
 
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_US_SP500.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_SP500.db")
 
 
 #---- Download Data ----
