@@ -9,18 +9,23 @@ import pandas as pd
 import numpy as np
 
 #%% Hyperparameter
-settings = {'rolling_window':{'validation_periods':6, #6 months
-                                 'window_size':3*12,  #3 years
-                                 'trading_month': pd.to_datetime('2004-01-31'), #Dates onwards must be fully out of sample
-                                 'tuning_fold': 1, # = 1 implies only the last window_size + validation_periods are used for cross-validation of the hyperparameters
-                                 'trading_end': pd.to_datetime('2024-11-30') #Last trading period
-                                 },
-               'RFF': {'p_vec':np.array([2**i for i in range(6,14)]),
-                       'sigma_vec': np.array([0.5,1,10,50]),
-                       'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1_000, 10_000, 100_000])
-                       },
-               'gamma': 1.0
-               }
+
+def get_settings():
+
+    settings = {'rolling_window':{'validation_periods':6, #6 months
+                                     'window_size':3*12,  #3 years
+                                     'trading_month': pd.to_datetime('2004-01-31'), #Dates onwards must be fully out of sample
+                                     'tuning_fold': 1, # = 1 implies only the last window_size + validation_periods are used for cross-validation of the hyperparameters
+                                     'trading_end': pd.to_datetime('2024-11-30') #Last trading period
+                                     },
+                   'RFF': {'p_vec':np.array([2**i for i in range(6,14)]),
+                           'sigma_vec': np.array([0.5,1,10,50]),
+                           'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1_000, 10_000, 100_000])
+                           },
+                   'gamma': 5.0
+                   }
+    
+    return settings
 
 #%%
 

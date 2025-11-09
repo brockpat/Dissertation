@@ -41,6 +41,9 @@ import numpy as np
 import os
 os.chdir(path + "Code/")
 import General_Functions as GF
+
+settings = GF.get_settings()
+
 import Portfolio_Optimiser_Functions as pof
 
 from scipy.optimize import minimize
@@ -54,18 +57,22 @@ Gradient_Ascent = True  #Else BFGS
 #%% Read in Data
 
 #Trading dates
-trading_start, trading_end = GF.settings['rolling_window']['trading_month'], GF.settings['rolling_window']['trading_end']
+trading_start, trading_end = settings['rolling_window']['trading_month'], settings['rolling_window']['trading_end']
 trading_dates = pd.date_range(start=trading_start,
                               end=trading_end,
                               freq='M'
                               )
 
 df_kl, df_returns, df_pf_weights, df_wealth, \
-    dict_barra, JKP_Factors = pof.load_data(path +"Data/JKP_US_SP500.db",   #Database
+    dict_barra, JKP_Factors = pof.load_data(path +"Data/JKP_SP500.db",   #Database
                                         path + "Data/wealth_evolution.csv", #Wealth Evolution
                                         path + '/Data/Barra_Cov.pkl',       #Barra Cov
                                         trading_start                       #Trading start date
                                         )
+
+df_kl = df_kl.drop_duplicates()
+    
+df_pf_weights = df_pf_weights.sort_values(by = ['eom','id'],ascending = [True,True])   
 
 #%% Compute Optimal Portfolio
 
@@ -223,7 +230,7 @@ for date in trading_dates:
         #Diagonal of Kyle's Lambda matrix
         L_diag = torch.tensor(kyles_lambda['lambda'])
         #Risk Aversion
-        gamma = torch.tensor(GF.settings['gamma']) 
+        gamma = torch.tensor(settings['gamma']) 
         #Wealth
         w = torch.tensor(df_wealth.loc[df_wealth['eom'] == date]['wealth'].iloc[0])
         #Previous portfolio (in levels)
@@ -236,7 +243,7 @@ for date in trading_dates:
         optimizer = torch.optim.Adam([pi_logits], lr=1e-2)
         
         #--- Define Constraint Parameters ---
-        max_weight = 0.1
+        max_weight = 0.05
         # This is a new hyperparameter you may need to tune.
         # A higher value enforces the constraint more strictly.
         penalty_weight = 1000.0
@@ -302,14 +309,53 @@ for date in trading_dates:
         
         #Append Result
         df_strategy.append(df_t)
+    
+results = pd.concat(df_strategy)
+
+df_profit = results.groupby('eom').apply(lambda df: (df['rev'] - df['tc']).sum()).reset_index().rename(columns = {0: 'strategy_profit'}) 
+df_profit['cumulative_return'] = (1 + df_profit['strategy_profit']).cumprod() - 1
+
+df_spy = pd.read_sql_query("SELECT * from SPY_Return",
+                           con = JKP_Factors,
+                           parse_dates = {'eom'})
+
+df_spy = df_spy[df_spy['eom'].isin(df_profit.eom.unique())]
+df_spy['cumulative_return'] = (1 + df_spy['SPY_ret']).cumprod() - 1
+
+
+plt.plot(df_profit['eom'], df_profit['cumulative_return'], label ='strategy')
+plt.plot(df_spy['eom'], df_spy['cumulative_return'], label ='SPY')
+plt.show()
+
+
+df_profit = df_profit.merge(risk_free, on = 'eom', how = 'left')
+df_profit['ret_exc'] = df_profit['strategy_profit'] - df_profit['rf']
+
+df_spy = df_spy.merge(risk_free, on = 'eom', how = 'left')
+df_spy['ret_exc'] = df_spy['SPY_ret'] - df_spy['rf']
+
+
+mu = df_profit['ret_exc'].mean()
+sigma = df_profit['ret_exc'].std(ddof=1)  # sample std
+Sharpe_Strategy = np.sqrt(12) * (mu / sigma)
+
+mu = df_spy['ret_exc'].mean()
+sigma = df_spy['ret_exc'].std(ddof=1)  # sample std
+Sharpe_Spy = np.sqrt(12) * (mu / sigma)
+
+information_ratio = np.sqrt(12) * np.mean(df_profit['ret_exc'] - df_spy['ret_exc'])/((df_profit['ret_exc'] - df_spy['ret_exc']).std(ddof=1))
+
+"""
+An IR = 0.5 means:
+
+For every 1% of tracking error (volatility of return relative to the benchmark), your portfolio earns 0.5% of excess return on average per year.
+
+Put differently:
+
+Your strategy adds 0.5 units of active return per unit of active risk.
+"""
         
-df_profit = results.groupby('eom').apply(lambda df: df['rev'] - df['tc'])   
-        
-        
-I HAVE TO COMPARE PROFIT WITH THE S&P 500 MARKET RETURN
-        
-        
-        
+#%%        
         
         
         
