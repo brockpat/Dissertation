@@ -30,17 +30,13 @@ import numpy as np
 
 import os
 os.chdir(path + "Code/")
-from Functions import *
+from General_Functions import *
 
 import scipy.stats
 
-"""
-5 years = 60 months. e.g. 1981-01-31 until 1986-12-31
-"""
-
 #%% Z-Scores of Features
 
-def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date, method):
+def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date_id, method):
     """
     Parameters
     ----------
@@ -48,11 +44,11 @@ def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date, method):
     num_cols : list[str]. List of columns to compute Z-scores on.
     one_hot_cols : list[str]. List of columns to remain unedited.
     stock_id : str. Stock identifier.
-    date : str. Date Variable
+    date_id : str. Date Variable
 
     Returns
     -------
-    DataFrame containing the stock identifier, date, the Z-scored
+    DataFrame containing the stock identifier, date_id, the Z-scored
            num_cols, and the original unedited one_hot_cols.
            Missing values after standardization are imputed with 0.0
 
@@ -64,7 +60,7 @@ def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date, method):
         if method == "Z_score":
             return (series - series.mean())/series.std()
         elif method == "Rank":
-            return (series.rank(method='average',pct=True)*2-1).fillna(0)
+            return (series.rank(method='average',pct=True)*2-1)
         else: return ValueError
 
     def standardise_df(df, num_cols:list, stock_id:str, date_id:str):
@@ -92,7 +88,7 @@ def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date, method):
 
 #%%
 #Read in processed characteristics
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_US_SP500.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_SP500.db")
 chars  = pd.read_sql_query("SELECT * FROM Factors_processed", 
                            con=JKP_Factors,
                            parse_dates={'eom'}
@@ -102,10 +98,10 @@ chars  = pd.read_sql_query("SELECT * FROM Factors_processed",
 signals = get_signals()
 
 #Compute Z-scores
-df_Z = Feat_Standardisation(chars, signals[0], signals[1], stock_id = 'id', date = 'eom', method = 'Z_score')
+df_Z = Feat_Standardisation(chars, signals[0], signals[1], stock_id = 'id', date_id = 'eom', method = 'Z_score')
 
 #Compute Rank-Standardisation
-df_rank = Feat_Standardisation(chars, signals[0], signals[1], stock_id = 'id', date = 'eom', method = 'Rank')
+df_rank = Feat_Standardisation(chars, signals[0], signals[1], stock_id = 'id', date_id = 'eom', method = 'Rank')
 
 #Save to DataBase
 df_Z.to_sql(name = 'Signals_ZScore', con = JKP_Factors, if_exists = 'replace', index = False)
