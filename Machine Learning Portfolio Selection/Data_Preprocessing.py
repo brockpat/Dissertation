@@ -11,21 +11,17 @@ path = "C:/Users/pbrock/Desktop/ML/"
 #DataFrame Libraries
 import pandas as pd
 import sqlite3
-from pandas.tseries.offsets import MonthEnd
 
 #Turn off pandas performance warnings
 import warnings
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
-
-#Plot Libraries
-import matplotlib.pyplot as plt
 
 #Scientifiy Libraries
 import numpy as np
 
 import os
 os.chdir(path + "Code/")
-from General_Functions import *
+import General_Functions as GF
 
 #%% Read in Risk Free Rate
 """
@@ -64,7 +60,7 @@ market = (pd.read_csv(path + "Data/market_returns.csv", dtype={"eom": str})
 
 df_market_return = (market
                     .merge(risk_free, left_on = ['eom_ret'], right_on = ['eom'],
-                                how = 'left')
+                           how = 'left')
                     .assign(mkt_vw = lambda df: df['mkt_vw_exc'] + df['rf'])
                     .drop(['eom'], axis = 1)
                     )
@@ -78,11 +74,13 @@ print("Market Return Loaded.")
 
 #Connect to Database
 JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
+JKP_Factors_SP500 = sqlite3.connect(database=path +"Data/JKP_SP500.db")
 CRSP_monthly = sqlite3.connect(database=path +"Data/CRSP_monthly.db")
+SP500_Constituents = sqlite3.connect(database = path + "Data/SP500_Constituents.db")
 
 
 #List of Stock Features
-features = get_features(exclude_poor_coverage = True)
+features = GF.get_features(exclude_poor_coverage = True)
 
 print("Reading in Chars Data (Full Date Range)")
 
@@ -109,17 +107,29 @@ chars  = pd.read_sql_query(query,
                            parse_dates={'eom'}
                            )
 
-#Add additional columns:
-#   dollar volume
-chars["dolvol"] = chars["dolvol_126d"]
-#   Kyle's Lambda (0.1 = price impact)
-chars["lambda"] = 0.2 / chars["dolvol"]  # Price impact for trading 1% of daily volume
-#   Monthly version of rvol by annualizing daily volatility.
-chars["rvol_m"] = chars["rvol_252d"] * (21 ** 0.5)
-
 #Delete if Return not available
 chars = chars.dropna(subset = 'MthRet')
 chars = chars.rename(columns = {'MthRet':'tr'})
+
+#Add additional columns:
+#   Kyle's Lambda (0.1 = price impact)
+chars["lambda"] = 0.2 / chars["dolvol_126d"]  # Price impact for trading 1% of daily volume
+#   Monthly version of rvol by annualizing daily volatility.
+chars["rvol_m"] = chars["rvol_252d"] * (21 ** 0.5)
+
+#Add S&P 500 indicator
+df_sp500 = (pd.read_sql_query("SELECT * FROM SP500_Constituents",
+                             con = SP500_Constituents,
+                             parse_dates = {'eom'})
+            .assign(in_sp500 = True)
+            )
+
+chars = (chars.merge(df_sp500, left_on = ['id', 'eom'], right_on = ['PERMNO', 'eom'],
+                    how = 'left', suffixes = ("", "_delete"))
+         .assign(in_sp500 = lambda df: df['in_sp500'].astype('boolean').fillna(False))
+         .drop(columns = ['PERMNO'])
+         )
+
 
 #==================================================
 #              Data Screening
@@ -135,9 +145,9 @@ print(f"   Non-missing me excludes {pct_me_missing:.2f}% of the observations")
 chars = chars[~chars["me"].isna()]
 
 # Require non-missing and non-zero dollar volume.
-pct_dolvol_invalid = ((chars["dolvol"].isna()) | (chars["dolvol"] == 0)).mean() * 100
-print(f"   Non-missing/non-zero dolvol excludes {pct_dolvol_invalid:.2f}% of the observations")
-chars = chars[(~chars["dolvol"].isna()) & (chars["dolvol"] > 0)]
+pct_dolvol_invalid = ((chars["dolvol_126d"].isna()) | (chars["dolvol_126d"] == 0)).mean() * 100
+print(f"   Non-missing/non-zero dolvol_126d excludes {pct_dolvol_invalid:.2f}% of the observations")
+chars = chars[(~chars["dolvol_126d"].isna()) & (chars["dolvol_126d"] > 0)]
 
 # Require valid SIC code.
 pct_sic_invalid = (chars["sic"].isna()).mean() * 100
@@ -173,9 +183,9 @@ chars = (chars
 #==================================================
 #          Compute Excess Market Return
 #==================================================
-#Compute S&P 500 Return
+#Compute value-weighted S&P 500 Return at end of month using beginning of month market equity
 
-#Lag Market Equity (i.e. begin of month market equity)
+#Lag Market Equity to get begin of month market equity
 sp500_rets = chars.get(['id','eom','me','tr'])
 sp500_rets = sp500_rets.assign(eom_lead = lambda df: df['eom'] + pd.offsets.MonthEnd(1))
 sp500_rets = (sp500_rets.merge(sp500_rets[['id','eom_lead','me']],
@@ -185,6 +195,7 @@ sp500_rets = (sp500_rets.merge(sp500_rets[['id','eom_lead','me']],
                               .drop(columns = ['eom_lead', 'eom_lead_lag'])
                               .dropna()
                               )
+
 #Compute market return over the month
 sp500_rets = (sp500_rets
               .groupby('eom')[['tr','me_lag']]
@@ -193,7 +204,8 @@ sp500_rets = (sp500_rets
               .rename(columns = {0:'sp500_ret'})
               )
 
-sp500_rets.to_sql(name = 'SP500_Return_BaH', con = JKP_Factors, if_exists = 'replace', index = False)
+#Save Returns
+sp500_rets.to_sql(name = 'SP500_Return', con = JKP_Factors_SP500, if_exists = 'replace', index = False)
 
 #Compute Excess market return (tr_m_sp500)
 chars = (chars
@@ -201,11 +213,12 @@ chars = (chars
          .assign(tr_m_sp500 = lambda df: df['tr'] - df['sp500_ret'])
          .drop(['sp500_ret'],axis=1)
          )
+
 #==================================================
 #          Lead Excess Market Return
 #==================================================
 
-chars = chars.assign(eom_lead = lambda df: df['eom'] + MonthEnd(1))
+chars = chars.assign(eom_lead = lambda df: df['eom'] + pd.offsets.MonthEnd(1))
 lead_ret = (chars
            .get(['id','eom', 'tr', 'tr_m_sp500'])
            )
@@ -222,17 +235,20 @@ chars = (chars.merge(lead_ret,
 #Save Memory
 del lead_ret
 
+"""
+LEGACY CODE: Data_Preprocessing is now done for the entire CRSP universe,
+so this problem no longer exists.
 #==================================================
 #          Fill missing Excess Market Return
 #==================================================
-"""
+""
 If a stock leaves the S&P500, next month's return is no longer in the dataset.
 This incurs a look-ahead bias such that at time t we'd know that in the next
 month the stock is no longer in the S&P500. These leaded returns are filled
 with the CRSP monthly dataset containing more than just the S&P 500.
 
 If no lead return exists, then the stock is dropped from the investable universe.
-"""
+""
 
 # Filter Permnos
 permnos = chars.id.unique()
@@ -278,6 +294,7 @@ chars = chars[~chars['tr_m_sp500_ld1'].isna()]
 
 #Drop auxiliary dataset
 del monthly_rets
+"""
 
 #==================================================
 #          Excess Market Return Dummys
@@ -293,7 +310,7 @@ chars = (chars
 #==================================================
 
 #Get Industry Classification
-chars["ff12"] = chars["sic"].apply(categorize_sic).astype(str)
+chars["ff12"] = chars["sic"].apply(GF.categorize_sic).astype(str)
 
 #Get List of Industries
 industries = sorted(chars["ff12"].dropna().unique())
@@ -310,8 +327,6 @@ chars = pd.concat([chars, ff12_dummies], axis=1)
 #Drop String Variables
 chars = chars.drop('ff12',axis=1)
 
-chars = chars.drop_duplicates(subset = ['eom','id'])
-
 #Save Memory
 del ff12_dummies
 
@@ -325,8 +340,12 @@ chars.to_sql(name = 'Factors_processed', con = JKP_Factors, if_exists = 'replace
 
 print("Chars Data Complete")
 
+#Connect to Database
 JKP_Factors.close()
+JKP_Factors_SP500.close()
 CRSP_monthly.close()
+SP500_Constituents.close()
+
 
 #%% Exogenous Wealth (AUM) Evolution
 """
@@ -339,7 +358,7 @@ g_t \pi_{t-1} is the initial portfolio weight in time period t.
 wealth is beginning of period, market return mu is end of period
 """
 #Get the Wealth Evolution 
-wealth = (wealth_func(5e11, chars.eom.max(), market, risk_free)
+wealth = (GF.wealth_func(5e11, chars.eom.max(), market, risk_free)
           .assign(eom = lambda df: pd.to_datetime(df['eom']))
           )
 
