@@ -12,7 +12,7 @@ of the S&P 500.
 import pandas as pd
 import sqlite3
 
-path = "C:/Users/pf122/Desktop/Uni/Frankfurt/2023-24/Machine Learning/Single Authored/"
+path = "C:/Users/pbrock/Desktop/ML/"
 
 #%%
 
@@ -41,8 +41,14 @@ df_sp500 = (pd.DataFrame(records, columns=["PERMNO", "MonthEnd"])
             .reset_index(drop = True)
             )
 
+#ID of every stock that is, was or will be in the S&P 500
+ids_alltime = pd.Series(df_sp500['PERMNO'].unique(), name='id')
+
 #Save to DataBase
-df_sp500.to_sql(name = "SP500_Constituents", if_exists = 'replace', 
+df_sp500.to_sql(name = "SP500_Constituents_monthly", if_exists = 'replace', 
                 con = SP500_Constituents, index = False)
+
+ids_alltime.to_sql(name = "SP500_Constituents_alltime", if_exists = "replace",
+                   con = SP500_Constituents, index = False)
 
 SP500_Constituents.close()
