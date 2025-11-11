@@ -9,7 +9,7 @@ This file computes the covariance matrix as in (37).
 
 #%% Libraries
 
-path = "C:/Users/patri/Desktop/ML/"
+path = "C:/Users/pbrock/Desktop/ML/"
 
 import os
 os.chdir(path + "Code/")
@@ -18,7 +18,6 @@ import pickle
 
 import pandas as pd
 import sqlite3
-from pandas.tseries.offsets import MonthEnd
 
 import numpy as np
 from tqdm import tqdm
@@ -238,30 +237,31 @@ def ewma_wrapper(series):
 #List of Stock Features
 features = GF.get_features(exclude_poor_coverage = True)
 
+ff12_features = ['ff12_BusEq', 'ff12_Chems', 'ff12_Durbl', 
+                 'ff12_Enrgy', 'ff12_Hlth', 'ff12_Manuf', 
+                 'ff12_Money', 'ff12_NoDur', 'ff12_Other', 
+                 'ff12_Shops', 'ff12_Telcm', 'ff12_Utils']
 
 #%% Load DataSets
 
 #Connect to DataBases
 JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
-JKP_Factors_SP500 = sqlite3.connect(database = path + "Data/JKP_SP500.db")
 crsp_daily = sqlite3.connect(database = path + "Data/crsp_daily.db")
-
-ids_sp500 = (pd.read_sql_query("SELECT id FROM Factors",
-                              con = JKP_Factors_SP500)
-             .drop_duplicates()
-             .get('id')
-             .tolist()
-             )
-
-# Convert to a comma-separated string for SQL
-ids_sp500 = ', '.join(map(str, ids_sp500))
+SP500_Constituents = sqlite3.connect(database = path + "Data/SP500_Constituents.db")
 
 #Select Time Frame (Chunk) to read in
 start_date = "1990-01-01"
 end_date = "2024-12-31"
 
+sp500_ids = list(pd.read_sql_query("SELECT * FROM SP500_Constituents_alltime",
+                              con = SP500_Constituents)['id']
+                 )
+
+sp500_ids = ', '.join(str(x) for x in sp500_ids)
+SP500_Constituents.close()
+
 # =============================================================================
-#                           Chars 1187152
+#                           Read in Data
 # =============================================================================
 print(f"Reading in Factors. Range: {start_date} to {end_date}")
 
@@ -269,16 +269,16 @@ print(f"Reading in Factors. Range: {start_date} to {end_date}")
 #   Set Empty String
 query_features =""
 #   Fill the Empty String with the features
-for feature in features:
+for feature in features + ff12_features:
     query_features = query_features + feature + ", "
 #   Delete last comma and space to avoid syntax errors
 query_features = query_features[:-2]
 #   Build final query vector
-query = ("SELECT id, eom, sic, ff49, size_grp, me, ret_exc, crsp_exchcd, " 
+query = ("SELECT id, eom, sic, ff49, size_grp, me, ret_exc, crsp_exchcd, in_sp500, " 
          + query_features 
-         +" FROM Factors " 
+         +" FROM Factors_processed " 
          +f"WHERE eom BETWEEN '{start_date}' AND '{end_date}' "
-         +f"AND id IN ({ids_sp500})" #Filter for CRSP observations (id <= 99999)
+         +f"AND id IN ({sp500_ids})" #Filter for CRSP observations (id <= 99999)
          # Not required as I only have CRSP Data in my DataSet anyway
          )
 
@@ -287,35 +287,14 @@ chars  = pd.read_sql_query(query,
                            con=JKP_Factors,
                            parse_dates=['eom']
                            )
-chars = chars.drop_duplicates()
 
 print("    Complete.")
 
-#---- Data Screening ----
+#%%
 
-#Save key metrics before screening which clears out Data
-n_start = len(chars)
-me_start= np.sum(chars['me'].dropna())
-
-#Require non-missing market equity 'me'.
-pct_me_missing = chars["me"].isna().mean() * 100
-print(f"   Non-missing me excludes {pct_me_missing:.2f}% of the observations")
-chars = chars[~chars["me"].isna()]
-
-# Require valid SIC code.
-pct_sic_invalid = (chars["sic"].isna()).mean() * 100
-print(f"   Valid SIC code excludes {pct_sic_invalid:.2f}% of the observations")
-chars = chars[~chars["sic"].isna()]
-
-# Feature screens: count the number of non-missing features.
-feat_available = chars[features].notna().sum(axis=1)
-min_share = 0.4
-min_feat = np.floor(len(features)) * min_share #50% of features with non-missings we want per stock
-print(f"   At least {min_share * 100}% of feature excludes {round((feat_available < min_feat).mean() * 100, 2)}% of the observations")
-chars = chars[feat_available >= min_feat] #Kick out observations with too many missing values
-print(f"In total, the final dataset has {round((len(chars) / n_start) * 100, 2)}% of the observations and {round((chars['me'].sum() / me_start) * 100, 2)}% of the market cap in the data")
-
-#---- Feature Ranks ----
+# =============================================================================
+#                           Feature Ranks
+# =============================================================================
 """
 Performs feature standardization by converting features to percentile ranks within each time period.
 
@@ -346,36 +325,24 @@ del ranked, mask
 
 print("Feature Rank Complete.")
 
-#---- Industry Dummy ----
-# Generate Industry Classification String
-chars = chars.assign(ff12 = lambda df: df["sic"].astype(int).apply(GF.categorize_sic).astype(str))
-
-#Get List of Industries
-industries = sorted(chars["ff12"].dropna().unique())
-
-#Enforce categorical type
-chars['ff12'] = pd.Categorical(chars['ff12'], categories=industries)
-
-print("Industry Dummy Creation Complete.")
-
 # =============================================================================
 #                               Daily Data
 # =============================================================================
 print(f"Reading in Daily Returns. Range: {start_date} to {end_date}")
+
+id_list = ', '.join(str(x) for x in chars['id'].unique())
 #Read in Data
 #   Query
 query_daily = ("SELECT permno as id, date, ret_excess as ret_exc FROM d_ret_ex "
 + f"WHERE date BETWEEN '{start_date}' AND '{end_date}'" 
 #+  "AND id <= 99999" #(only CRSP Data in my Dataset anyway)
-+f"AND id IN ({ids_sp500})"
++f"AND id IN ({id_list})"
 )
 #   Read in Data
 daily = pd.read_sql_query(query_daily,
                           con = crsp_daily,
                           parse_dates = {'date'}
                           )
-
-daily = daily.drop_duplicates()
 
 # Filter
 n_start = len(daily)
@@ -401,7 +368,7 @@ Compute each stock's rank of a cluster of characteristics in the cross-section
 for all valid observations
 """
 #Get Valid Observations
-cluster_data_m = chars[['id', 'eom', 'size_grp', 'ff12'] + features]
+cluster_data_m = chars[['id', 'eom', 'size_grp'] + features + ff12_features]
 
 #Rename Object
 #cluster_data_m = chars
@@ -420,22 +387,13 @@ del cluster_labels
 Overwrite DataFrame and throw out Characteristics Data for Cluster Ranks
 """
 # Add ranks to cluster_data_m
-cluster_data_m = cluster_data_m[['id', 'eom', 'size_grp', 'ff12']]
+cluster_data_m = cluster_data_m[['id', 'eom', 'size_grp'] + ff12_features]
 
 # Lead eom
 cluster_data_m['eom_lead'] = (pd.to_datetime(cluster_data_m['eom']) + pd.offsets.MonthEnd(1))
 
 # Combine with cluster_ranks_df
 cluster_data_m = pd.concat([cluster_data_m, cluster_ranks], axis=1)
-
-"""
-Include Industry Dummys
-"""
-# Add industry or market dummies based on settings
-industries = sorted(cluster_data_m['ff12'].dropna().unique())
-for ind in industries:
-    cluster_data_m[str(ind)] = (cluster_data_m['ff12'] == ind).astype(int)
-ind_factors = industries
 
 print("Cluster Ranks Completed.")
 
@@ -479,7 +437,7 @@ Conduct the daily stock return regression.
 Store the OLS Residual and the OLS-Coefficients, i.e. the daily estimated factor returns
 """
 # Prepare column names
-factor_cols = ind_factors + clusters
+factor_cols = ff12_features + clusters
 X_cols = factor_cols
 y_col = 'ret_exc'
 
@@ -722,5 +680,7 @@ for d in tqdm(calc_dates, desc="Calculating Barra Cov"):
 #%% Save Dictionaries       
 with open(path + '/Data/Barra_Cov.pkl', 'wb') as f:
     pickle.dump(barra_cov, f)
-
-
+    
+#%% Close remaining connections
+JKP_Factors.close()
+crsp_daily.close()
