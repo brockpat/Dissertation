@@ -174,10 +174,6 @@ def weighted_cor_wt(df, weights):
     
     return cor_df
 
-# =============================================================================
-#               Idiosyncratic Variance diag(epsilon_{t+1})
-# =============================================================================
-
 #Define the moving average function
 @njit
 def ewma_vol(x, lam, start):
@@ -579,7 +575,10 @@ for d in tqdm([date for date in calc_dates], desc="Calculating factor covariance
     
 #Save Workspace
 del fct_ret
-    
+
+# =============================================================================
+#               Idiosyncratic Variance diag(epsilon_{t+1})
+# =============================================================================
 
 # Compute exponentially weighted moving average to get MONTHLY squared OLS residual
 spec_risk['res_vol'] = (
@@ -627,6 +626,9 @@ spec_risk_m = spec_risk_m.rename(columns={'eom_ret': 'eom'})
 del spec_risk
 
 #%% Barra Covariance Matrix
+# =============================================================================
+#               	Barra Covariance Matrix
+# =============================================================================
 """
 Compute the Barra Covariance Matrix as in (37). Note: Only the relevant objects
 to do the final computation in (37) are saved.
