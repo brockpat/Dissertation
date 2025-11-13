@@ -352,7 +352,7 @@ daily['eom'] = daily['date'] + pd.offsets.MonthEnd(0)
 print("    Complete.")
 
 # =============================================================================
-#                           Additional Data
+#                           Cluster Data
 # =============================================================================
 print("Reading in Cluster Labels Data")
 cluster_labels = pd.read_csv(path + "Data/cluster_labels_processed.csv")
@@ -403,6 +403,9 @@ cluster_data_m[clusters] = (cluster_data_m
 print("Cluster Cross-Sectional Z-Scores Completed.")
 
 #%% Prepare DataFrame for Daily Stock Return Regression
+# =============================================================================
+#                           Daily Return Regression
+# =============================================================================
 """
 Merge 1 month lagged Cluster Ranks to daily Stock Return Data for the 
 daily return regression.
