@@ -208,7 +208,7 @@ def rff_validation(Z_val, val_targets, beta):
     
     #Compute R^2
     residuals = predicted_returns - val_targets
-    R2 = 1-np.var(residuals)/np.var(val_targets)
+    R2 = 1-np.mean(residuals**2)/np.var(val_targets)
     
     return R2
 
@@ -381,7 +381,7 @@ signals:list = get_signals()
 #Fill missing values with 0. Industry Dummys have no missing values
 df_signals[signals[0]] = df_signals[signals[0]].fillna(0)
 
-combinations = [[3, 1], [12, 1], [36, 1]]
+combinations = [[12, 3], [36, 3]]
 
 
 trading_dates = pd.date_range(settings['rolling_window']['trading_month'], df_signals.eom.max(), freq = 'ME')
