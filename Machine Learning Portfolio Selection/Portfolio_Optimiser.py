@@ -56,6 +56,7 @@ settings = GF.get_settings()
 JKP_Factors = sqlite3.connect(database = path + "Data/JKP_clean.db")
 SP500_Constituents = sqlite3.connect(database = path + "Data/SP500_Constituents.db")
 Benchmarks = sqlite3.connect(database = path + "Data/Benchmarks.db")
+Models = sqlite3.connect(database = path + "Data/Predictions.db")
 
 
 #============================
@@ -86,6 +87,8 @@ trading_dates = pd.date_range(start=trading_start,
                               end=trading_end,
                               freq='ME'
                               )
+
+#Start and End Date as Strings
 start_date = str(trading_start - pd.offsets.MonthEnd(1))[:10]
 end_date = str(trading_end)[:10]
 
@@ -113,6 +116,7 @@ sp500_constituents = (pd.read_sql_query(f"SELECT * FROM SP500_Constituents_month
                       .rename(columns = {'PERMNO': 'id'})
                       )
 
+
 #============================
 #       Data
 #============================
@@ -121,6 +125,11 @@ df_pf_weights, df_kl, df_returns,\
     df_wealth, dict_barra = pof.load_data(JKP_Factors, start_date, 
                                           sp500_ids, path, 
                                           predictor = "Myopic Oracle")
+
+#At 'eom', predictions are for eom+1
+df_retPred = pd.read_sql_query("SELECT * FROM XGBoost_LevelTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12",
+                               con = Models,
+                               parse_dates = {'eom'})
 #%% Compute Optimal Portfolio
 
 #Container to store results
@@ -166,9 +175,9 @@ for date in trading_dates:
 
 
     #----- Return Predictions -----
-    return_predictions = (df_returns
-                          .loc[df_returns['eom'] == prev_date]
-                          .get(['id', 'eom','tr_m_sp500_ld1'])
+    return_predictions = (df_retPred
+                          .loc[df_retPred['eom'] == prev_date]
+                          .get(['id', 'eom','ret_pred'])
                           )
     zeros.extend([stock for stock in active if stock not in return_predictions['id'].values])
     active = sorted([stock for stock in active if stock not in zeros])
@@ -268,7 +277,7 @@ for date in trading_dates:
     
     #--- Define Torch Objects
     #Return Prediction for active stocks
-    r = torch.tensor(return_predictions['tr_m_sp500_ld1'])
+    r = torch.tensor(return_predictions['ret_pred'])
     #Covariance Matrix of Returns for active stocks
     S = torch.tensor(Sigma.to_numpy())
     #Diagonal of Kyle's Lambda matrix for active stocks
@@ -288,11 +297,11 @@ for date in trading_dates:
     
     #--- Define Constraint Parameters
     #Maximum portfolio weight
-    max_pi = 0.05
+    max_pi = 0.2
 
     #Penalty for inequality constraints
-    penalty_maxPi = 100.0
-    penalty_var = 100.0
+    penalty_maxPi = 1.0
+    penalty_var   = 1.0
     
     #maximum allowed variance
     max_var = df_spy[df_spy['eom'] == prev_date]['variance'].iloc[0]
@@ -372,6 +381,7 @@ df_spy['cumulative_return'] = (1 + df_spy['ret']).cumprod() - 1
 #Plot Comparison to Benchmark
 plt.plot(df_profit['eom'], df_profit['cumulative_return'], label ='strategy')
 plt.plot(df_profit['eom'], df_spy['cumulative_return'], label ='SPY')
+plt.legend()
 plt.show()
 
 #---- Compute Sharpe Ratio ----
