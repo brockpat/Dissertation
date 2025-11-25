@@ -12,12 +12,13 @@ import numpy as np
 
 def get_settings():
 
-    settings = {'rolling_window':{'validation_periods':6, #6 months
-                                     'window_size':3*12,  #3 years
-                                     'trading_month': pd.to_datetime('2004-01-31'), #Dates onwards must be fully out of sample
-                                     'tuning_fold': 1, # = 1 implies only the last window_size + validation_periods are used for cross-validation of the hyperparameters
-                                     'trading_end': pd.to_datetime('2024-12-31') #Last trading period
-                                     },
+    settings = {'rolling_window':{'validation_periods':12, #12 months
+                                  'window_size':10*12,  #10 years
+                                  'test_size': 12, #1 year
+                                  'trading_month': pd.to_datetime('2004-01-31'), #Dates onwards must be fully out of sample
+                                  'tuning_fold': 1, # = 1 implies only the last window_size + validation_periods are used for cross-validation of the hyperparameters
+                                  'trading_end': pd.to_datetime('2024-12-31') #Last trading period
+                                  },
                    'RFF': {'p_vec':np.array([2**i for i in range(6,14)]),
                            'sigma_vec': np.array([0.5,1,10,50]),
                            'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1_000, 10_000, 100_000])

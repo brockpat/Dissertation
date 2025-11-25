@@ -16,24 +16,14 @@ path = "C:/Users/pbrock/Desktop/ML/"
 #DataFrame Libraries
 import pandas as pd
 import sqlite3
-from pandas.tseries.offsets import MonthEnd
 
 #Turn off pandas performance warnings
 import warnings
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
-#Plot Libraries
-import matplotlib.pyplot as plt
-
-#Scientifiy Libraries
-import numpy as np
-
 import os
 os.chdir(path + "Code/")
-from General_Functions import *
-
-import scipy.stats
-
+import General_Functions as GF
 #%% Z-Scores of Features
 
 def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date_id, method):
@@ -88,14 +78,14 @@ def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date_id, method):
 
 #%%
 #Read in processed characteristics
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_SP500.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
 chars  = pd.read_sql_query("SELECT * FROM Factors_processed", 
                            con=JKP_Factors,
                            parse_dates={'eom'}
                            )
 
 #Signals: First list numerical features, second list one-hot-encodings
-signals = get_signals()
+signals = GF.get_signals()
 
 #Compute Z-scores
 df_Z = Feat_Standardisation(chars, signals[0], signals[1], stock_id = 'id', date_id = 'eom', method = 'Z_score')

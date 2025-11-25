@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Created on Thu Nov 20 09:48:48 2025
+Created on Tue Nov 25 10:14:16 2025
 
 @author: pbrock
 """
+
 
 #%% Libraries
 
@@ -30,6 +31,56 @@ import os
 os.chdir(path + "Code/")
 import General_Functions as GF
 
+#%% Functions
+
+def spearman_corr(a, b):
+    """
+    Spearman rank correlation without scipy.
+    """
+    a = pd.Series(a)
+    b = pd.Series(b)
+    a_rank = a.rank(method="average")
+    b_rank = b.rank(method="average")
+    return np.corrcoef(a_rank, b_rank)[0, 1]
+
+
+def mean_spearman_ic_by_group(y_true, y_pred, group_sizes):
+    """
+    Compute mean Spearman IC across groups (e.g. months).
+
+    Parameters
+    ----------
+    y_true : 1D array-like
+        True target values, ordered by group (month).
+    y_pred : 1D array-like
+        Predicted values, same order as y_true.
+    group_sizes : list of int
+        Number of observations in each group, in the same order as y_true.
+
+    Returns
+    -------
+    float
+        Mean Spearman IC across groups.
+    """
+    ics = []
+    idx = 0
+    for g in group_sizes:
+        y_t = y_true[idx:idx + g]
+        y_p = y_pred[idx:idx + g]
+        idx += g
+
+        # Skip degenerate cases
+        if len(np.unique(y_t)) < 2 or len(np.unique(y_p)) < 2:
+            continue
+
+        ic = spearman_corr(y_t, y_p)
+        if not np.isnan(ic):
+            ics.append(ic)
+
+    if len(ics) == 0:
+        return np.nan
+    return float(np.nanmean(ics))
+
 #%% Preliminaries & Data
 
 #=================================================
@@ -51,7 +102,7 @@ window_size = 120 #10 years of data
 validation_size = 12 #1 year of data
 test_size = 12 #Periods until hyperparameters are re-tuned. Fine-tuning is done monthly
 
-file_end = f"LevelTarget_CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
+file_end = f"RankTarget_CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
 
 #Trading Dates
 trading_dates = pd.date_range(settings['rolling_window']['trading_month'], "2024-12-31", freq = 'ME')
@@ -73,6 +124,11 @@ query = ("SELECT id, eom, tr_m_sp500_ld1 FROM Factors_processed "
 df_targets = pd.read_sql_query(query,
                                con = JKP_Factors,
                                parse_dates = {'eom'})
+
+#Create Target Ranks in [-1,1]
+df_targets['tr_m_sp500_ld1'] = (df_targets.groupby('eom')['tr_m_sp500_ld1']
+                                .transform(lambda x: x.rank(pct = True)*2-1)
+                                )
     
 
 #Merge (Merging in Python was quicker than via SQL)
@@ -107,7 +163,7 @@ base_params = dict(
     learning_rate=0.05,
     n_estimators=300,
     max_depth=3,
-    min_child_weight=5,
+    min_child_weight=2,
     subsample=0.8,
     colsample_bytree=0.8,
     gamma=0.0,
@@ -118,25 +174,26 @@ base_params = dict(
 )
 
 #Optuna Objective Function
-def make_objective(X_train, y_train, X_val, y_val):
-
+def make_objective(X_train, y_train, X_val, y_val, group_val):
+    
     def objective(trial):
         params = {
             "objective": "reg:squarederror",
             "tree_method": "hist",
             "n_jobs": -1,
-            "random_state": 42,
+            "random_state": 2025,
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
             "max_depth": trial.suggest_int("max_depth", 2, 8),
-            "min_child_weight": trial.suggest_float("min_child_weight", 1.0, 10.0),
+            "min_child_weight": trial.suggest_float("min_child_weight", 0.1, 5.0), #Too few splits = Too few buckets and very coarse rank prediction
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+            "gamma": trial.suggest_float("gamma", 0.0, 1.0), #Too few splits = Too few buckets and very coarse rank prediction
             "reg_alpha": 0,  # no L1
-            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 20.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 5.0, log=True), #too high penalty might overflatten the score
             
             # FIX n_estimators (M) to a high value high; early stopping decides the effective number of M
             "n_estimators": 500,
+            #"n_estimators": trial.suggest_int("n_estimators", 10, 150),
             "eval_metric": "rmse",
             'early_stopping_rounds': 50
         }
@@ -149,14 +206,24 @@ def make_objective(X_train, y_train, X_val, y_val):
             verbose=False,
         )
         
-        # Save best_iteration for this trial (number of trees M)
-        trial.set_user_attr("best_iteration", model.best_iteration)
+        # Best iteration for this trial
+        best_iteration = getattr(model, "best_iteration", params["n_estimators"] - 1)
+        trial.set_user_attr("best_iteration", int(best_iteration))
 
+        # ---- Our tuning metric: mean per-month Spearman IC ----
         y_val_pred = model.predict(X_val)
-        mse = mean_squared_error(y_val, y_val_pred)
-        return mse  # Optuna will minimize this
-        
-    return objective
+        ic_mean = mean_spearman_ic_by_group(
+            y_true=y_val,
+            y_pred=y_val_pred,
+            group_sizes=group_val,
+        )
+        # In case of degenerate groups, penalize heavily
+        if np.isnan(ic_mean):
+            return 1e9
+
+        return -ic_mean
+    
+    return objective 
 
 #%% Rolling Window Estimation
 
@@ -185,13 +252,15 @@ for date in trading_dates:
     val_months   = window_months[window_size:]
     
     # Training Data
-    X_train = df_signals[df_signals['eom'].isin(train_months)][feat_cols].to_numpy()
-    y_train = df_signals[df_signals['eom'].isin(train_months)]['tr_m_sp500_ld1'].to_numpy()
-    
+    X_train = df_signals[df_signals['eom'].isin(train_months)].sort_values(['eom', 'id'])[feat_cols].to_numpy()
+    y_train = df_signals[df_signals['eom'].isin(train_months)].sort_values(['eom', 'id'])['tr_m_sp500_ld1'].to_numpy()
+    group_train = df_signals[df_signals['eom'].isin(train_months)].sort_values(['eom', 'id']).groupby('eom').size().tolist()
+
     #Validation Data
-    X_val = df_signals[df_signals['eom'].isin(val_months)][feat_cols].to_numpy()
-    y_val = df_signals[df_signals['eom'].isin(val_months)]['tr_m_sp500_ld1'].to_numpy()
-    
+    X_val = df_signals[df_signals['eom'].isin(val_months)].sort_values(['eom', 'id'])[feat_cols].to_numpy()
+    y_val = df_signals[df_signals['eom'].isin(val_months)].sort_values(['eom', 'id'])['tr_m_sp500_ld1'].to_numpy()
+    group_val = df_signals[df_signals['eom'].isin(val_months)].sort_values(['eom', 'id']).groupby('eom').size().tolist()
+
     
     #======================================================
     #     Hyperparameter tuning every `test_size` months
@@ -202,7 +271,7 @@ for date in trading_dates:
     
         # Run Optuna tuning
         study = optuna.create_study(direction="minimize")
-        objective = make_objective(X_train, y_train, X_val, y_val)
+        objective = make_objective(X_train, y_train, X_val, y_val, group_val)
         study.optimize(objective, n_trials=15)
     
         # Extract optimal hyperparameters
@@ -247,9 +316,10 @@ for date in trading_dates:
     
     #Get Train + Val Data
     window_mask = df_signals['eom'].isin(window_months)
-    X_window = df_signals.loc[window_mask, feat_cols]
-    y_window = df_signals.loc[window_mask, 'tr_m_sp500_ld1']
-    
+    X_window = df_signals.loc[window_mask].sort_values(['eom', 'id'])[feat_cols]
+    y_window = df_signals.loc[window_mask].sort_values(['eom', 'id'])['tr_m_sp500_ld1']
+    group_window = df_signals.loc[window_mask].sort_values(['eom', 'id']).groupby('eom').size().tolist()
+
     #Train the Model given the hyperparameters
     final_model = XGBRegressor(**best_params)
     final_model.fit(
