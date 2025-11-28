@@ -17,9 +17,6 @@ import sqlite3
 import warnings
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
-#Plot Libraries
-import matplotlib.pyplot as plt
-
 #Scientific Libraries
 import numpy as np
 from xgboost import XGBClassifier          
@@ -40,64 +37,70 @@ import General_Functions as GF
 JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
 db_Predictions = sqlite3.connect(database=path +"Data/Predictions.db")
 
+
 #Get Settings & signals
 settings = GF.get_settings()
 signals = GF.get_signals()
-feat_cols = signals[0] + signals[1]
+feat_cols = signals[0] + signals[1] #Continuous and Categorical Features
+
+
+#=================================================
+#           Rolling Window Parameters
+#=================================================
 
 #Window Size and Validation Periods for rolling window
 window_size = settings['rolling_window']['window_size']
 validation_size = settings['rolling_window']['validation_periods'] 
 test_size = settings['rolling_window']['test_size'] #Periods until hyperparameters are re-tuned. Fine-tuning is done monthly
 
-file_end = f"BinaryTarget_CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
+trade_start = settings['rolling_window']['trading_start']
+trade_end = settings['rolling_window']['trading_end']
+trading_dates = pd.date_range(trade_start, trade_end, freq = 'ME')
 
-#Trading Dates
-trading_dates = pd.date_range(settings['rolling_window']['trading_month'], "2024-12-31", freq = 'ME')
+
+#=================================================
+#               Model Type
+#=================================================
+model_name = "XGBClass"
+target_type = "BinaryTarget"
+file_end = f"CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
+
 
 #=================================================
 #               Read in Data
 #=================================================
 
 #Read in processed signals
-query = (
-    "SELECT * FROM Signals_Rank "
-    f"WHERE eom >= '{(trading_dates[0] - pd.offsets.MonthEnd(window_size+validation_size+1)).strftime('%Y-%m-%d')}'"
-)
-df_signals = pd.read_sql_query(
-    query,
-    con=JKP_Factors,
-    parse_dates={'eom'}
-)
+query = ("SELECT * FROM Signals_Rank "
+         f"WHERE eom >= '{(trade_start-pd.offsets.MonthEnd(window_size+validation_size+1)).strftime("%Y-%m-%d")}' AND eom <= '{(trade_end + pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'")
+df = pd.read_sql_query(query,
+                               con = JKP_Factors,
+                               parse_dates = {'eom'})
 
-#Read in Targets: BINARY DUMMY ONLY
-query = (
-    "SELECT id, eom, tr_m_sp500_ld1_Dummy FROM Factors_processed "
-    f"WHERE eom >= '{(trading_dates[0] - pd.offsets.MonthEnd(window_size+validation_size+1)).strftime('%Y-%m-%d')}'"
-)
-df_targets = pd.read_sql_query(
-    query,
-    con=JKP_Factors,
-    parse_dates={'eom'}
-)
+#Read in Targets
+query = ("SELECT id, eom, tr_m_sp500_ld1_Dummy FROM Factors_processed "
+         f"WHERE eom >= '{(trade_start-pd.offsets.MonthEnd(window_size+validation_size+1)).strftime("%Y-%m-%d")}' AND eom <= '{(trade_end + pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'")
+df_targets = pd.read_sql_query(query,
+                               con = JKP_Factors,
+                               parse_dates = {'eom'})
 
-#Merge (Merging in Python was quicker than via SQL)
-df_signals = (
-    df_signals
-    .merge(df_targets, on=['id', 'eom'], how='left')
-    .dropna(subset=['tr_m_sp500_ld1_Dummy'])
-    .sort_values(by=['eom', 'id'])
-)
+    
+#Merge to signals (Merging in Python was quicker than via SQL)
+df = (df.merge(df_targets, on = ['id','eom'], how = 'left')
+      .dropna(subset=['tr_m_sp500_ld1_Dummy'])
+      .sort_values(by = ['eom','id'])
+      )
 
-if df_signals['tr_m_sp500_ld1_Dummy'].isna().sum() > 0:
+if df['tr_m_sp500_ld1_Dummy'].isna().sum() > 0:
     print("ERROR: Missing Values in Target. Training cannot be initiated")
 del df_targets
 
+
 #Extract unique Months of signals
-signal_months = df_signals['eom'].sort_values().unique()
+signal_months = df['eom'].sort_values().unique()
 
 #Extract index of trading start
-trade_idx = signal_months.searchsorted(trading_dates[0])
+trade_idx = signal_months.searchsorted(trade_start)
 
 #%% XGBoost Preparation
 
@@ -174,12 +177,12 @@ for date in trading_dates:
     val_months   = window_months[window_size:]
 
     # Training Data (BINARY TARGET)
-    X_train = df_signals[df_signals['eom'].isin(train_months)][feat_cols].to_numpy()
-    y_train = df_signals[df_signals['eom'].isin(train_months)]['tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
+    X_train = df[df['eom'].isin(train_months)][feat_cols].to_numpy()
+    y_train = df[df['eom'].isin(train_months)]['tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
 
     #Validation Data (BINARY TARGET)
-    X_val = df_signals[df_signals['eom'].isin(val_months)][feat_cols].to_numpy()
-    y_val = df_signals[df_signals['eom'].isin(val_months)]['tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
+    X_val = df[df['eom'].isin(val_months)][feat_cols].to_numpy()
+    y_val = df[df['eom'].isin(val_months)]['tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
 
     #======================================================
     #     Hyperparameter tuning every `test_size` months
@@ -232,9 +235,9 @@ for date in trading_dates:
     #===========================================================
 
     #Get Train + Val Data
-    window_mask = df_signals['eom'].isin(window_months)
-    X_window = df_signals.loc[window_mask, feat_cols].to_numpy()
-    y_window = df_signals.loc[window_mask, 'tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
+    window_mask = df['eom'].isin(window_months)
+    X_window = df.loc[window_mask, feat_cols].to_numpy()
+    y_window = df.loc[window_mask, 'tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
 
     #Train the Model given the hyperparameters
     final_model = XGBClassifier(**best_params)  # <--- CHANGED
@@ -245,9 +248,9 @@ for date in trading_dates:
     #===========================================================
 
     # Make the next month prediction for the out-of-sample period
-    test_mask = (df_signals['eom'] == date - pd.offsets.MonthEnd(1))
-    X_test = df_signals.loc[test_mask, feat_cols].to_numpy()
-    ids_test = df_signals.loc[test_mask, ['id', 'eom']]
+    test_mask = (df['eom'] == date - pd.offsets.MonthEnd(1))
+    X_test = df.loc[test_mask, feat_cols].to_numpy()
+    ids_test = df.loc[test_mask, ['id', 'eom']]
 
     # Predicted probability of positive return (class 1)
     y_test_proba = final_model.predict_proba(X_test)[:, 1]
@@ -265,11 +268,11 @@ for date in trading_dates:
     predictions.append(pred_df)
 
     # Save the model for this date
-    model_path = os.path.join(path, "Models/XGBoost/", f"xgb_{file_end}_{date.strftime('%Y%m%d')}.json")
+    model_path = os.path.join(path, "Models/XGBoost/", f"{model_name}_{target_type}_{file_end}_date_{date.strftime('%Y%m%d')}.json")
     final_model.save_model(model_path)
 
     # Dump tree structure in text format
-    tree_path = os.path.join(path, "Models/XGBoost/", f"xgb_trees_{file_end}_{date.strftime('%Y%m%d')}.txt")
+    tree_path = os.path.join(path, "Models/XGBoost/", f"{model_name}_trees_{target_type}_{file_end}_date_{date.strftime('%Y%m%d')}.txt")
     final_model.get_booster().dump_model(tree_path)
 
     #Increment index due to new trading_month
@@ -279,7 +282,7 @@ for date in trading_dates:
 df_predictions = pd.concat(predictions)
 
 df_predictions.to_sql(
-    name = f"XGBClass_{file_end}",    # <--- CHANGED: classification table name
+    name = f"{model_name}_{target_type}_{file_end}",
     con = db_Predictions,
     index = False,
     if_exists = 'append'

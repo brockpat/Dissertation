@@ -7,6 +7,7 @@ Created on Mon Oct 20 15:04:35 2025
 
 import pandas as pd
 import numpy as np
+import sqlite3
 
 #%% Hyperparameter
 
@@ -15,13 +16,13 @@ def get_settings():
     settings = {'rolling_window':{'validation_periods':12, #12 months
                                   'window_size':10*12,  #10 years
                                   'test_size': 12, #1 year
-                                  'trading_month': pd.to_datetime('2004-01-31'), #Dates onwards must be fully out of sample
+                                  'trading_start': pd.to_datetime('2003-01-31'), #Dates onwards must be fully out of sample
                                   'tuning_fold': 1, # = 1 implies only the last window_size + validation_periods are used for cross-validation of the hyperparameters
                                   'trading_end': pd.to_datetime('2024-12-31') #Last trading period
                                   },
-                   'RFF': {'p_vec':np.array([2**i for i in range(6,14)]),
+                   'RFF': {'p_vec':np.array([2**i for i in range(6,11)]),
                            'sigma_vec': np.array([0.5,1,10,50]),
-                           'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1_000, 10_000, 100_000])
+                           'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1e3, 1e4, 1e5])
                            },
                    'gamma': 5.0
                    }
@@ -420,3 +421,98 @@ def portfolio_return_BFGS(logits, pi_tm1, gt, Sigma, KL, wealth, return_predicti
     tc = 0.5* wealth * np.sum(KL * change_pf**2)
     
     return -(revenue - tc - var_pen)
+
+#%% Return Prediction
+
+def load_signals_rollingwindow(
+    db_conn: sqlite3.Connection,
+    settings: dict,
+    target: str,
+    rank_signals: bool,
+    trade_start: str,
+    trade_end: str, 
+    fill_missing_values: bool
+) -> tuple[pd.DataFrame | None, np.ndarray | None, int | None]:
+    """
+    Reads, merges, and preprocesses signal and target data for a rolling window analysis.
+
+    Args:
+        db_conn: An active SQLite database connection object (e.g., to JKP_clean.db).
+        settings: A dictionary containing 'rolling_window' configuration.
+        target: Prediction Target
+        rank_signals: If True, queries the 'Signals_Rank' table; otherwise,
+                          queries the 'Signals_ZScore' table.
+        fill_missing_values: If True, fills NaNs of features with zero (industry classifiers have no missing values).
+
+    Returns:
+        A tuple containing:
+        - df_signals: The merged and cleaned DataFrame (or None on failure).
+        - signal_months: A numpy array of unique 'eom' dates in the signals data (or None on failure).
+        - trade_idx: The index in signal_months where the rolling window process starts (or None on failure).
+    """
+    # 1. Configuration Extraction
+    window_size = settings['rolling_window']['window_size']
+    validation_size = settings['rolling_window']['validation_periods']
+
+    # Determine which signals table to query
+    signal_table = "Signals_Rank" if rank_signals else "Signals_ZScore"
+
+    # Trading Dates (Hardcoded end date from original snippet)
+    trading_dates = pd.date_range(trade_start, trade_end, freq='ME')
+
+    # Calculate the required data before 1st trading date
+    required_lag = window_size + validation_size + 1
+    query_start_date = trading_dates[0] - pd.offsets.MonthEnd(required_lag)
+    query_start_date_str = query_start_date.strftime("%Y-%m-%d")
+    
+    #Feature columns
+    signals = get_signals()
+    feat_cols = signals[0] + signals[1]
+
+    # 2. Read Signals Data
+    query_signals = (f"SELECT * FROM {signal_table} "
+                     f"WHERE eom >= '{query_start_date_str}' "
+                     f"AND eom <= '{(pd.to_datetime(trade_end)+pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'"
+                     )
+
+    df_signals = pd.read_sql_query(
+        query_signals,
+        con=db_conn,
+        parse_dates={'eom'}
+    )
+
+    # 3. Read Targets Data
+    query_targets = (f"SELECT id, eom, {target} FROM Factors_processed "
+                     f"WHERE eom >= '{query_start_date_str}' "
+                     f"AND eom <= '{(pd.to_datetime(trade_end)+pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'"
+                     )
+
+    df_targets = pd.read_sql_query(
+        query_targets,
+        con=db_conn,
+        parse_dates={'eom'}
+    )
+
+    # 4. Merge and Pre-process
+    df_signals = (df_signals
+                  .merge(df_targets, on=['id', 'eom'], how='left')
+                  # Drop rows where target (tr_m_sp500_ld1) is missing
+                  .dropna(subset=[target])
+                  .sort_values(by=['eom', 'id'])
+                 )
+
+    # Sanity check from original code (should be 0 after dropna)
+    if df_signals[target].isna().sum() > 0:
+        print("ERROR: Missing Values in Target after merge and dropna. This is unexpected.")
+
+    # 5. Fill Missing Values in Signals
+    if fill_missing_values:
+        df_signals[signals[0]] = df_signals[signals[0]].fillna(0)
+
+    # 6. Calculate outputs
+    signal_months = df_signals['eom'].sort_values().unique()
+
+    # Find the index of the first trading date in the signal months array
+    trade_idx = np.searchsorted(signal_months, trading_dates[0])
+
+    return df_signals, signal_months, trade_idx, feat_cols, window_size, validation_size, trade_idx
