@@ -23,6 +23,64 @@ import os
 os.chdir(path + "Code/")
 import General_Functions as GF
 
+#WRDS access
+"""
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+load_dotenv("Credentials.env")
+"""
+
+#%% Getting CRSP Monthly
+"""
+#Set up WRDS Engine
+connection_string = (
+  "postgresql+psycopg2://"
+ f"{os.getenv('WRDS_USER')}:{os.getenv('WRDS_PASSWORD')}"
+  "@wrds-pgdata.wharton.upenn.edu:9737/wrds"
+)
+wrds = create_engine(connection_string, pool_pre_ping=True)
+
+# Query Text
+crsp_monthly_query = (
+  "SELECT msf.permno, date_trunc('month', msf.mthcaldt)::date AS date, "
+         "msf.mthret AS ret, msf.shrout, msf.mthprc AS altprc, "
+         "ssih.primaryexch, ssih.siccd, msf.ticker "
+    "FROM crsp.msf_v2 AS msf "
+    "INNER JOIN crsp.stksecurityinfohist AS ssih "
+    "ON msf.permno = ssih.permno AND "
+       "ssih.secinfostartdt <= msf.mthcaldt AND "
+       "msf.mthcaldt <= ssih.secinfoenddt "
+   "WHERE msf.mthcaldt BETWEEN '1950-01-01' AND '2024-12-31' "
+          #US-listed stocks
+          "AND ssih.sharetype = 'NS' "
+          #security type equity
+          "AND ssih.securitytype = 'EQTY' "  
+          #security sub type common stock
+          "AND ssih.securitysubtype = 'COM' "
+          #US Incorporation Flag (Y/N)
+          "AND ssih.usincflg = 'Y' " 
+          #Issuer is a corporation
+          "AND ssih.issuertype in ('ACOR', 'CORP') " 
+          #NYSE, AMEX, NASDAQ Stocks
+          "AND ssih.primaryexch in ('N', 'A', 'Q') "
+          #Stock Prices when or after issuence
+          "AND ssih.conditionaltype in ('RW', 'NW') "
+          #Actively Traded Stocks
+          "AND ssih.tradingstatusflg = 'A'"
+)
+
+
+# Download Stock Return
+crsp_monthly = (pd.read_sql_query(
+    sql=crsp_monthly_query,
+    con=wrds,
+    dtype={"permno": int, "siccd": int},
+    parse_dates={"date"})
+    #Shares Outstanding is in thousands, make it in Millions
+  .assign(shrout=lambda x: x["shrout"]*1000)
+)
+"""
+
 #%% Read in Risk Free Rate
 """
 Load Risk-Free Rate Data from Kenneth French's Website.
@@ -68,14 +126,14 @@ print("Market Return Loaded.")
 
 #%% Stock Factors
 
-#===================
-# Read in Data
-#===================
+#===========================================
+#               Read in Data
+#===========================================
 
 #Connect to Database
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
+JKP_Factors_clean = sqlite3.connect(database=path +"Data/JKP_clean.db")
+JKP_Factors_processed  = sqlite3.connect(database=path +"Data/JKP_processed.db")
 JKP_Factors_SP500 = sqlite3.connect(database=path +"Data/JKP_SP500.db")
-CRSP_monthly = sqlite3.connect(database=path +"Data/CRSP_monthly.db")
 SP500_Constituents = sqlite3.connect(database = path + "Data/SP500_Constituents.db")
 
 
@@ -103,11 +161,11 @@ query = ("SELECT id, eom, sic, ff49, size_grp, me, crsp_exchcd, ret_exc, MthRet,
 
 # Read in JKP characteristics data.
 chars  = pd.read_sql_query(query, 
-                           con=JKP_Factors,
+                           con=JKP_Factors_clean,
                            parse_dates={'eom'}
                            )
 
-#Delete if Return not available
+#Drop if Total Return not available
 chars = chars.dropna(subset = 'MthRet')
 chars = chars.rename(columns = {'MthRet':'tr'})
 
@@ -117,8 +175,13 @@ chars["lambda"] = 0.2 / chars["dolvol_126d"]  # Price impact for trading 1% of d
 #   Monthly version of rvol by annualizing daily volatility.
 chars["rvol_m"] = chars["rvol_252d"] * (21 ** 0.5)
 
+
+#==================================================
+#              S&P 500 indicator
+#==================================================
+
 #Add S&P 500 indicator
-df_sp500 = (pd.read_sql_query("SELECT * FROM SP500_Constituents",
+df_sp500 = (pd.read_sql_query("SELECT * FROM SP500_Constituents_monthly",
                              con = SP500_Constituents,
                              parse_dates = {'eom'})
             .assign(in_sp500 = True)
@@ -162,23 +225,13 @@ print(f"   At least {min_share * 100}% of feature excludes {round((feat_availabl
 chars = chars[feat_available >= min_feat] #Kick out observations with too many missing values
 print(f"In total, the final dataset has {round((len(chars) / n_start) * 100, 2)}% of the observations and {round((chars['me'].sum() / me_start) * 100, 2)}% of the market cap in the data")
 
+# Drop nano stocks
+print(f"   Excluding all nano stocks excludes {round((chars['size_grp'] == 'nano').sum()/len(chars) * 100, 2)}% of the observations")
+chars = chars.loc[chars.size_grp != 'nano']
 
-"""
-Legacy Code: No longer required as MthRet merged from CRSP monthly is the total
-return of a stock
-#==================================================
-#               Compute total (raw) Return
-#==================================================
-#Compute total (raw) return
-chars = (chars
-            # Merge risk-free rate
-            .merge(risk_free, on=['eom'])
-            # Compute total (raw) return
-            .assign(tr=lambda df: df['ret_exc'] + df['rf'])
-            .drop('rf',
-                  axis=1)
-            )
-"""
+#Drop very high returns
+print(f"   Excluding all returns > 100% excludes {round((chars['tr']>1).sum()/(len(chars)) * 100, 2)}% of the observations")
+chars = chars.loc[chars['tr']<1]
 
 #==================================================
 #          Compute Excess Market Return
@@ -235,67 +288,6 @@ chars = (chars.merge(lead_ret,
 #Save Memory
 del lead_ret
 
-"""
-LEGACY CODE: Data_Preprocessing is now done for the entire CRSP universe,
-so this problem no longer exists.
-#==================================================
-#          Fill missing Excess Market Return
-#==================================================
-""
-If a stock leaves the S&P500, next month's return is no longer in the dataset.
-This incurs a look-ahead bias such that at time t we'd know that in the next
-month the stock is no longer in the S&P500. These leaded returns are filled
-with the CRSP monthly dataset containing more than just the S&P 500.
-
-If no lead return exists, then the stock is dropped from the investable universe.
-""
-
-# Filter Permnos
-permnos = chars.id.unique()
-permnos = permnos_str = ', '.join(map(str, permnos))
-
-query = ("SELECT PERMNO AS id, eom, MthRet AS tr " 
-         "FROM CRSP_Monthly "
-        "WHERE "
-        f"PERMNO IN ({permnos}) "
-        f"AND eom BETWEEN '{chars.eom.min()}' AND '{chars.eom.max()}'" 
-        )
-
-#Load CRSP monthly Returns
-monthly_rets  = pd.read_sql_query(query, 
-                           con=CRSP_monthly,
-                           parse_dates={'eom'}
-                           )
-
-#Compute excess market return
-monthly_rets = (monthly_rets
-                .merge(sp500_rets, on = ['eom'])
-                .assign(tr_m_sp500 = lambda x: x['tr'] - x['sp500_ret'])
-                )
-
-#Merge to chars
-chars = (chars
-         .merge(monthly_rets[['id', 'eom', 'tr_m_sp500']],
-                left_on=['id', 'eom_lead'],
-                right_on=['id', 'eom'],
-                how='left',
-                suffixes=('', '_mr') # Add suffixes to distinguish 
-                )
-         .drop('eom_mr',axis=1)
-         )
-#Fill Missing Future Returns
-chars['tr_m_sp500_ld1'] = chars['tr_m_sp500_ld1'].fillna(chars['tr_m_sp500_mr'])
-
-#Drop Auxiliary Variable
-chars = chars.drop(['tr_m_sp500_mr','eom_lead'],axis=1)
-
-#Drop observations for which no lead return exists
-chars = chars[~chars['tr_m_sp500_ld1'].isna()]
-
-#Drop auxiliary dataset
-del monthly_rets
-"""
-
 #==================================================
 #          Excess Market Return Dummys
 #==================================================
@@ -336,16 +328,16 @@ del ff12_dummies
 #==================================================
 
 #Save Chars to DataBase
-chars.to_sql(name = 'Factors_processed', con = JKP_Factors, if_exists = 'replace', index = False)
+chars.to_sql(name = 'Factors_processed', con = JKP_Factors_processed, 
+             if_exists = 'replace', index = False)
 
 print("Chars Data Complete")
 
 #Connect to Database
-JKP_Factors.close()
+JKP_Factors_clean.close()
 JKP_Factors_SP500.close()
-CRSP_monthly.close()
+JKP_Factors_processed.close()
 SP500_Constituents.close()
-
 
 #%% Exogenous Wealth (AUM) Evolution
 """
