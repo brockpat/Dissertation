@@ -40,7 +40,6 @@ def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date_id, method):
     -------
     DataFrame containing the stock identifier, date_id, the Z-scored
            num_cols, and the original unedited one_hot_cols.
-           Missing values after standardization are imputed with 0.0
 
     """
     def standardise_col(series, method):
@@ -59,13 +58,9 @@ def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date_id, method):
         of columns (num_cols) from a pandas dataframe (df).
         The stock identifier (stock_id) is kept for identification purposes.
         
-        Missing values are filled with 0.
         """
         #Standardise features in the cross-section
         df_standardised = df.set_index([stock_id]).groupby(date_id)[num_cols].apply(standardise_col, method = method)
-        
-        #Fill missing values with 0
-        #df_standardised = df_standardised.fillna(0)
         
         return df_standardised
     
@@ -78,8 +73,8 @@ def Feat_Standardisation(df, num_cols, one_hot_cols, stock_id, date_id, method):
 
 #%%
 #Read in processed characteristics
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
-chars  = pd.read_sql_query("SELECT * FROM Factors_processed", 
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_processed.db")
+chars  = pd.read_sql_query("SELECT * FROM Factors_processed WHERE eom > '1979-12-31'", 
                            con=JKP_Factors,
                            parse_dates={'eom'}
                            )
