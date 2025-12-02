@@ -268,12 +268,22 @@ chars = (chars
          )
 
 #==================================================
-#          Lead Excess Market Return
+#   Compute Cross-sectional Zscore of returns
+#==================================================
+chars['tr_Zscore'] = (chars
+                      .groupby('eom')['tr']
+                      .transform(lambda x: (x-x.mean())/x.std(ddof = 0))
+                      )
+
+
+
+#==================================================
+#                   Lead Returns
 #==================================================
 
 chars = chars.assign(eom_lead = lambda df: df['eom'] + pd.offsets.MonthEnd(1))
 lead_ret = (chars
-           .get(['id','eom', 'tr', 'tr_m_sp500'])
+           .get(['id','eom', 'tr', 'tr_m_sp500', 'tr_Zscore'])
            )
 
 chars = (chars.merge(lead_ret, 
@@ -282,7 +292,7 @@ chars = (chars.merge(lead_ret,
                      how = 'left',
                      suffixes = ('','_ld1')
                      )
-         .drop(['eom_ld1'],axis=1)
+         .drop(['eom_ld1','eom_lead'],axis=1)
          )
 
 #Save Memory
