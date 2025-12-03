@@ -84,7 +84,7 @@ def mean_spearman_ic_by_group(y_true, y_pred, group_sizes):
 #=================================================
 
 #Database
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_processed.db")
 db_Predictions = sqlite3.connect(database=path +"Data/Predictions.db")
 
 
@@ -92,6 +92,36 @@ db_Predictions = sqlite3.connect(database=path +"Data/Predictions.db")
 settings = GF.get_settings()
 signals = GF.get_signals()
 feat_cols = signals[0] + signals[1] #Continuous and Categorical Features
+
+
+#=================================================
+#               Read in Data
+#=================================================
+
+#Load Data
+df, signal_months, trading_month_start, feat_cols, \
+    window_size, validation_size  \
+        = GF.load_signals_rollingwindow(db_conn = JKP_Factors,          #Database with signals
+                                        settings = settings,            #General settings
+                                        target = 'tr_ld1',            #Prediction target
+                                        rank_signals = True,            #Use ZScores
+                                        trade_start = '2003-01-31',     #First trading date
+                                        trade_end = '2024-12-31',       #Last trading date
+                                        fill_missing_values = False,    #Fill missing values 
+                                        )
+
+
+#=================================================
+#      Additional: Rank Standardise Target
+#=================================================
+
+#Note that it is irrelevant what return we learn as ranks are invariant with respect to monotonic transformations
+target_col = 'tr_ld1_rank'
+
+df[target_col] = (df.groupby('eom')['tr_ld1']
+                  .transform(lambda x: x.rank(pct = True)*2-1)
+                  )
+df = df.drop(columns = 'tr_ld1')
 
 
 #=================================================
@@ -103,9 +133,8 @@ window_size = settings['rolling_window']['window_size']
 validation_size = settings['rolling_window']['validation_periods'] 
 test_size = settings['rolling_window']['test_size'] #Periods until hyperparameters are re-tuned. Fine-tuning is done monthly
 
-trade_start = settings['rolling_window']['trading_start']
-trade_end = settings['rolling_window']['trading_end']
-trading_dates = pd.date_range(trade_start, trade_end, freq = 'ME')
+#Trading Dates
+trading_dates = signal_months[trading_month_start:]
 
 
 #=================================================
@@ -116,47 +145,13 @@ target_type = "RankTarget"
 file_end = f"CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
 
 
-#=================================================
-#               Read in Data
-#=================================================
-
-#Read in processed signals
-query = ("SELECT * FROM Signals_Rank "
-         f"WHERE eom >= '{(trade_start-pd.offsets.MonthEnd(window_size+validation_size+1)).strftime("%Y-%m-%d")}' AND eom <= '{(trade_end + pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'")
-df = pd.read_sql_query(query,
-                               con = JKP_Factors,
-                               parse_dates = {'eom'})
-
-#Read in Targets
-query = ("SELECT id, eom, tr_m_sp500_ld1 FROM Factors_processed "
-         f"WHERE eom >= '{(trade_start-pd.offsets.MonthEnd(window_size+validation_size+1)).strftime("%Y-%m-%d")}' AND eom <= '{(trade_end + pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'")
-df_targets = pd.read_sql_query(query,
-                               con = JKP_Factors,
-                               parse_dates = {'eom'})
-
-#Create Target Ranks in [-1,1]
-df_targets['tr_m_sp500_ld1'] = (df_targets.groupby('eom')['tr_m_sp500_ld1']
-                                .transform(lambda x: x.rank(pct = True)*2-1)
-                                )
-    
-#Merge to signals (Merging in Python was quicker than via SQL)
-df = (df.merge(df_targets, on = ['id','eom'], how = 'left')
-      .dropna(subset = 'tr_m_sp500_ld1')
-      .sort_values(by = ['eom','id'])
-      )
-
-if df['tr_m_sp500_ld1'].isna().sum() > 0:
-    print("ERROR: Missing Values in Target. Training cannot be initiated")
-del df_targets
-
-
-#Extract unique Months of signals
-signal_months = df['eom'].sort_values().unique()
-
-#Extract index of trading start
-trade_idx = signal_months.searchsorted(trade_start)
-
 #%% XGBoost Preparation
+
+def prepare_data(df, months, target_col):
+    X = df[df['eom'].isin(months)].sort_values(['eom', 'id'])[feat_cols].to_numpy()
+    y = df[df['eom'].isin(months)].sort_values(['eom', 'id'])[target_col].to_numpy()
+    
+    return X, y
 
 #=================================================
 #               XGBoost Regression Tree
@@ -171,7 +166,7 @@ def make_objective(X_train, y_train, X_val, y_val, group_val):
             "tree_method": "hist",
             "n_jobs": -1,
             "random_state": 2025,
-            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.2, log=True),
+            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.05, log=True),
             "max_depth": trial.suggest_int("max_depth", 2, 8),
             "min_child_weight": trial.suggest_float("min_child_weight", 0.01, 5.0), #Too few splits = Too few buckets and very coarse rank prediction
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
@@ -181,10 +176,10 @@ def make_objective(X_train, y_train, X_val, y_val, group_val):
             "reg_lambda": trial.suggest_float("reg_lambda", 0.001, 5.0, log=True), #too high penalty might overflatten the score
             
             # FIX n_estimators (M) to a high value high; early stopping decides the effective number of M
-            "n_estimators": 500,
+            "n_estimators": 1_000,
             #"n_estimators": trial.suggest_int("n_estimators", 10, 150),
             "eval_metric": "rmse",
-            'early_stopping_rounds': 50
+            'early_stopping_rounds': 100
         }
 
         model = XGBRegressor(**params)
@@ -225,7 +220,7 @@ saved_best_params = None
 saved_best_n_estimators = None
 
 #Loop over dates (Rolling Window)
-for date in trading_dates:
+for trade_idx, date in enumerate(trading_dates, start=trading_month_start):
     
     #========================================
     # Get the Data for the Rolling Regression
@@ -241,16 +236,14 @@ for date in trading_dates:
     val_months   = window_months[window_size:]
     
     # Training Data
-    X_train = df[df['eom'].isin(train_months)].sort_values(['eom', 'id'])[feat_cols].to_numpy()
-    y_train = df[df['eom'].isin(train_months)].sort_values(['eom', 'id'])['tr_m_sp500_ld1'].to_numpy()
+    X_train, y_train = prepare_data(df, train_months, target_col)
     group_train = df[df['eom'].isin(train_months)].sort_values(['eom', 'id']).groupby('eom').size().tolist()
 
     #Validation Data
-    X_val = df[df['eom'].isin(val_months)].sort_values(['eom', 'id'])[feat_cols].to_numpy()
-    y_val = df[df['eom'].isin(val_months)].sort_values(['eom', 'id'])['tr_m_sp500_ld1'].to_numpy()
+    X_val, y_val = prepare_data(df, val_months, target_col)
     group_val = df[df['eom'].isin(val_months)].sort_values(['eom', 'id']).groupby('eom').size().tolist()
 
-    
+
     #======================================================
     #     Hyperparameter tuning every `test_size` months
     #======================================================
@@ -261,7 +254,7 @@ for date in trading_dates:
         # Run Optuna tuning
         study = optuna.create_study(direction="minimize")
         objective = make_objective(X_train, y_train, X_val, y_val, group_val)
-        study.optimize(objective, n_trials=15)
+        study.optimize(objective, n_trials=20)
     
         # Extract optimal hyperparameters
         best_params = study.best_params.copy()
@@ -304,10 +297,7 @@ for date in trading_dates:
     #===========================================================
     
     #Get Train + Val Data
-    window_mask = df['eom'].isin(window_months)
-    X_window = df.loc[window_mask].sort_values(['eom', 'id'])[feat_cols]
-    y_window = df.loc[window_mask].sort_values(['eom', 'id'])['tr_m_sp500_ld1']
-    group_window = df.loc[window_mask].sort_values(['eom', 'id']).groupby('eom').size().tolist()
+    X_window, y_window = prepare_data(df, window_months, target_col)
 
     #Train the Model given the hyperparameters
     final_model = XGBRegressor(**best_params)
@@ -344,10 +334,6 @@ for date in trading_dates:
     # Dump tree structure in text format
     tree_path = os.path.join(path, "Models/XGBoost/", f"{model_name}_trees_{target_type}_{file_end}_date_{date.strftime('%Y%m%d')}.txt")
     final_model.get_booster().dump_model(tree_path)
-
-
-    #Increment index due to new trading_month
-    trade_idx += 1
 
 #%% Save Predictions
 df_predictions = pd.concat(predictions)

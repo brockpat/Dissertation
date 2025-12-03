@@ -30,108 +30,194 @@ import json
 
 #%% Functions
 
-def rff_weights(num_cont_features, p_max, seed):
+def rff_prepare_data(df, months, target_col='tr_m_sp500_ld1'):
     """
-    Sample base frequency vectors (omega) for Random Fourier Features (RFFs).
+    Subset the signal DataFrame to a given set of months, sort, and
+    compute cross-sectionally demeaned targets.
 
-    The frequencies are drawn i.i.d. from a standard normal distribution and are
-    later rescaled by the kernel bandwidth 'sigma' inside rff_feature_map().
+    For all rows whose 'eom' is in 'months', this function:
+      - Sorts by ['eom', 'id'] for stable alignment.
+      - Computes the cross-sectional mean of 'target_col' within each 'eom'.
+      - Constructs a DataFrame with ['id', 'eom', demeaned_target].
 
     Parameters
     ----------
-    num_cont_features : int
-        Number of continuous input features.
-    p_max : int
-        Maximum total number of RFF features to support.
-        Only half of this (`p_max // 2`) frequency vectors are sampled.
-    seed : int, optional
-        Random seed used for reproducible frequency sampling.
+    df : pd.DataFrame
+        Full panel of signals and target. Must contain columns
+        ['eom', 'id', target_col] and all feature columns.
+    months : iterable
+        Collection of month end dates (same type as df['eom']) to keep.
+    target_col : str, default 'tr_m_sp500_ld1'
+        Name of the target return column to demean within each cross-section.
 
     Returns
     -------
-    base_W : np.ndarray of shape (num_inputs, p_max // 2)
-        Matrix of base frequency vectors (omegas) for the RFF transform.
+    X : pd.DataFrame
+        Feature matrix for the selected months, sorted by ['eom', 'id'],
+        with 'target_col' removed.
+    y_cs : pd.DataFrame
+        DataFrame with columns:
+          - 'id'
+          - 'eom'
+          - f"{target_col}_cs_demeaned": target demeaned within each 'eom'.
+        Ordered consistently with 'X'.
+    meta : pd.DataFrame
+        DataFrame with columns ['id', 'eom'] for the same rows as 'X' and 'y_cs'.
+    """
+    mask = df['eom'].isin(months)
+    X = df.loc[mask].sort_values(['eom', 'id']).copy()
+
+    # meta info for later
+    meta = X[['id', 'eom']].copy()
+
+    # cross-sectional demeaned target
+    y_cs = pd.concat([meta.reset_index(drop=True),X[target_col].reset_index(drop=True)],
+                     axis=1 
+                     )
+
+    return X.drop(columns = [target_col]), y_cs, meta
+
+def rff_weights(cont_feat_names, p_max, seed):
+    """
+    Sample base frequency weights (omegas) for Random Fourier Features.
+
+    The returned matrix contains standard normal draws and is later
+    rescaled by the kernel bandwidth 'sigma' and truncated to the
+    desired number of random features in 'rff_feature_map'.
+
+    Parameters
+    ----------
+    cont_feat_names : list of str
+        Names of continuous feature columns. Only the length of this list
+        is used to set the number of rows of the weight matrix.
+    p_max : int
+        Maximum total number of RFF features to support. Only half of this
+        ('p_max // 2') base frequency vectors are sampled.
+    seed : int
+        Random seed for reproducible frequency sampling.
+
+    Returns
+    -------
+    base_W : np.ndarray of shape (n_cont_features, p_max // 2)
+        Matrix of base random frequencies (standard normal draws) used
+        in the RFF transform.
     """
     rng = np.random.default_rng(seed)
     # Base random weights
-    base_W = rng.normal(loc=0.0, scale=1.0, size=(num_cont_features, p_max // 2))
+    base_W = rng.normal(loc=0.0, scale=1.0, size=(len(cont_feat_names), p_max // 2))
     
     return base_W
 
 
-def rff_feature_map(X:list, base_W:np.array, sigma:float, p:int):
+def rff_feature_map(X, cont_feat_names, oneHot_feat_names, base_W:np.array, sigma:float, p:int):
     """
-    Map input features X to Random Fourier Features (RFFs) for an RBF kernel.
+    Map input features to Random Fourier Features (RFFs) with per-month standardisation.
 
-    This implements the standard RFF feature map for an RBF kernel by
-    projecting X onto random frequencies, then applying cosine and sine
-    nonlinearities and appropriate scaling.
-
-    Specifically, for p total RFF features:
-    - Use m = p / 2 random frequencies (columns of base_W / sigma).
-    - Features are: sqrt(2 / p) * [cos(XW), sin(XW)].
+    This function:
+      1. Selects continuous features 'cont_feat_names' from 'X'.
+      2. Projects them onto random frequencies W = base_W / sigma (truncated to p/2 columns).
+      3. Applies cosine and sine transforms and scales by sqrt(2 / p).
+      4. Standardises the resulting RFFs cross-sectionally within each 'eom'
+         (zero mean, unit variance per month).
+      5. Optionally appends one-hot / categorical columns 'oneHot_feat_names'
+         without further transformation.
 
     Parameters
     ----------
-    X : List. First element is continuous signals, second is categorical signals
-    base_W : np.ndarray of shape (n_features, p_max // 2)
-        Base frequency matrix returned by rff_weights().
+    X : pd.DataFrame
+        Input data containing at least:
+          - Continuous feature columns listed in 'cont_feat_names'.
+          - Optional one-hot / categorical columns in 'oneHot_feat_names'.
+          - An 'eom' column used to define cross-sectional groups.
+    cont_feat_names : list of str
+        Names of continuous feature columns to be transformed into RFFs.
+    oneHot_feat_names : list of str
+        Names of columns to be appended as-is (e.g., dummy variables).
+        Can be empty.
+    base_W : np.ndarray, shape (n_cont_features, p_max // 2)
+        Base frequency matrix returned by 'rff_weights'.
     sigma : float
         RBF kernel bandwidth. Frequencies are scaled by 1 / sigma.
     p : int
-        Total number of RFF features to construct. Must be even.
+        Total number of RFF features (must be even). Internally, p/2
+        cosine and p/2 sine features are constructed.
 
     Returns
     -------
-    Z : np.ndarray of shape (n_samples, p)
-        Matrix of Random Fourier Features corresponding to X.
+    Z : np.ndarray of shape (n_samples, p + n_onehot)
+        Design matrix of standardised RFF features (p columns) concatenated
+        with any one-hot / categorical features selected by 'oneHot_feat_names'.
     """
-    # Scale weights by sigma
+    
+    # ---------------------------------------------------------
+    # 1. Setup and Raw RFF Projection
+    # ---------------------------------------------------------
+    # Scale weights
+    # Shape: (n_features, p//2)
     W = (base_W / sigma)[:, :p//2]
     
-    # Projection: X * W
-    proj = X[0] @ W
+    # Projection: X @ W
+    proj = X[cont_feat_names].to_numpy() @ W
     
     # Apply non-linearity (Cos and Sin)
-    Z = np.hstack([np.sqrt(1 / (p//2)) * np.cos(proj), 
-                   np.sqrt(1 / (p//2)) * np.sin(proj),
-                  X[1]]
-                  )
-    return Z
+    # Shape: (n_samples, p)
+    # We create this separately so we can standardise it BEFORE adding categoricals
+    Z_cont = np.hstack([np.cos(proj), np.sin(proj)]) * np.sqrt(2 / p)
 
-def rff_standardize_feature_map(Z):
+    # ---------------------------------------------------------
+    # 2. Efficient Cross-Sectional Standardisation
+    # ---------------------------------------------------------
+    # We iterate over the groups defined by 'eom' to calculate mean/std per month.
+    # X.groupby('eom').indices returns a dict: { '2004-01-31': [0, 1, 2...], ... }
+    # These indices align perfectly with Z_cont because X and Z_cont have the same row order.
     
-    Z_mean = np.mean(Z, axis=0)
-    Z_centered = Z - Z_mean
-    Z_std = np.std(Z_centered, axis=0, ddof=0)
-    Z_std[Z_std == 0] = 1.0  # avoid division by zero for constant columns
-    Z_scaled = (Z - Z_mean) / Z_std
+    for _, idx in X.groupby('eom').indices.items():
+        # 1. Slice the batch for this specific month
+        batch = Z_cont[idx]
+        
+        # 2. Compute Mean and Std for this month
+        mu = np.mean(batch, axis=0)
+        std = np.std(batch, axis=0, ddof = 0)
+        
+        # 3. Handle division by zero (constant features)
+        std[std == 0] = 1.0 
+        
+        # 4. Update the array in-place
+        Z_cont[idx] = (batch - mu) / std
+
+    # ---------------------------------------------------------
+    # 3. Final Assembly
+    # ---------------------------------------------------------
+    # Add the categorical features (untouched)
+    # Assuming cat_feat_names cols are numerical/dummies. 
+    # If they are strings, this will cause type issues.
     
-    return Z_scaled, Z_mean, Z_std
+    if len(oneHot_feat_names) > 0:
+        Z = np.hstack([Z_cont, X[oneHot_feat_names].to_numpy()])
+    else:
+        Z = Z_cont
+
+    return Z
 
 def rff_predict(Z, beta):
     """
-    Generate predictions from RFF features using a fitted ridge regression model.
-    
-    A column of ones is prepended to Z_test internally so that the intercept
-    in beta (first element) is properly applied.
-    
+    Compute predictions from a linear model given RFF features and coefficients.
+
+    This function assumes 'beta' corresponds exactly to the columns of 'Z'
+    (i.e., no intercept is added inside this function).
+
     Parameters
     ----------
     Z : np.ndarray of shape (n_samples, n_features)
-        Test design matrix (e.g., RFF features).
-    beta : np.ndarray of shape (n_features + 1,)
-        Coefficient vector returned by fit_ridge_regression(), with intercept
-        as the first element.
-    
+        Design matrix of RFF (and possibly additional) features.
+    beta : np.ndarray of shape (n_features,)
+        Coefficient vector of the fitted linear model.
+
     Returns
     -------
     y_pred : np.ndarray of shape (n_samples,)
-        Predicted target values.
+        Predicted target values Z @ beta.
     """
-    
-    #Add constant
-    Z = np.hstack([np.ones((Z.shape[0], 1)), Z])
     
     #Compute the prediction
     y_pred = Z @ beta 
@@ -140,137 +226,171 @@ def rff_predict(Z, beta):
 
 def oos_r2_score(y_true, y_pred):
     """
-    Compute the out-of-sample R-squared (OOS R2) of predictions.
+    Compute out-of-sample R-squared (OOS R²) given realised and predicted values.
 
-    The OOS R2 compares the mean squared prediction error against the variance
-    of the realized values. It can be negative if the model performs worse
-    than a naive predictor using the historical mean of y_true.
+    The statistic compares the mean squared prediction error to the variance
+    of the realised values. It can be negative if the model performs worse
+    than a constant-mean benchmark.
 
     Parameters
     ----------
     y_true : np.ndarray of shape (n_samples,)
-        Realized (true) target values.
+        Realised (true) target values.
     y_pred : np.ndarray of shape (n_samples,)
-        Predicted target values.
+        Model predictions for the same observations.
 
     Returns
     -------
     r2_oos : float
-        Out-of-sample R-squared statistic. Equals 1 for a perfect fit, 0 if
-        the model is equivalent to predicting the mean, and negative if the
-        model is worse than the mean.
+        Out-of-sample R-squared defined as:
+            1 - MSE(y_true, y_pred) / Var(y_true)
+        Returns 0.0 if Var(y_true) is zero.
     """
+    
     mse = np.mean((y_true - y_pred)**2)
-    var = np.var(y_true)
+    var = np.var(y_true, ddof = 0)
     if var == 0: return 0.0
     return 1 - (mse / var)
 
-
-def rff_fit_beta(X, y, base_W, params):
+def rff_fit_beta(X, y, cont_feat_names, oneHot_feat_names, base_W, params):
     """
-    Fit an RFF + ridge regression model for given hyperparameters.
-    
+    Fit a ridge regression model on RFF-transformed features.
+
     This is a convenience wrapper that:
-    1. Transforms X into RFF features using params['sigma'] and params['p'].
-    2. Fits a ridge regression model with penalty params['penalty'].
-    
+      1. Transforms 'X' into RFF (plus optional one-hot) features using
+         'rff_feature_map' with the hyperparameters in 'params'.
+      2. Solves a ridge-penalised linear regression using either the
+         primal or dual formulation depending on the sample/feature ratio.
+
+    No intercept term is added; the model is purely linear in the features
+    produced by 'rff_feature_map'. This is appropriate when inputs and/or
+    targets are already standardised or demeaned.
+
     Parameters
     ----------
-    X : array-like of shape (n_samples, n_features)
-        Input features (pre-RFF).
+    X : pd.DataFrame
+        Input features for the estimation window. Must contain:
+          - Continuous columns in 'cont_feat_names'
+          - Optional columns in 'oneHot_feat_names'
+          - An 'eom' column used for standardisation in 'rff_feature_map'.
     y : array-like of shape (n_samples,)
-        Target values.
-    base_W : np.ndarray of shape (n_features, p_max // 2)
-        Base frequency matrix from `sample_rff_frequencies`.
+        Target values (typically cross-sectionally demeaned returns).
+    cont_feat_names : list of str
+        Names of continuous feature columns to be transformed into RFFs.
+    oneHot_feat_names : list of str
+        Names of one-hot / categorical columns to append unchanged.
+    base_W : np.ndarray
+        Base frequency matrix returned by 'rff_weights'.
     params : dict
-        Hyperparameters for the RFF + ridge model. Must contain:
-            - 'sigma'   : float, kernel bandwidth.
-            - 'p'       : int, total number of RFF features (even).
-            - 'penalty' : float, ridge penalty.
-    
+        Hyperparameters for the RFF + ridge model with keys:
+          - 'sigma'   : float, kernel bandwidth.
+          - 'p'       : int, total number of RFF features (even).
+          - 'penalty' : float, ridge penalty parameter (lambda).
+
     Returns
     -------
-    beta : np.ndarray of shape (p + 1,)
-        Ridge regression coefficients including intercept as the first element.
+    beta : np.ndarray of shape (n_features,)
+        Ridge regression coefficients corresponding to the columns of the
+        transformed design matrix Z returned by 'rff_feature_map'.
     """
     
     #Scale Features
-    Z = rff_feature_map(X, base_W, params['sigma'], params['p'])
-    Z_scaled, Z_mean, Z_std = rff_standardize_feature_map(Z)
+    Z_cs_scaled = rff_feature_map(X, cont_feat_names, oneHot_feat_names, base_W, params['sigma'], params['p'])
     
-    #De-mean targets
-    y_mean = np.mean(y)
-    y_centered = y-y_mean
-    
-    n, p = Z_scaled.shape
+    n, p = Z_cs_scaled.shape
     penalty = params['penalty']
     
     # 1. Compute ZZ (Primal or Dual)
     if n >= p: # Primal form (Features <= Samples)
-        ZZ = Z_scaled.T @ Z_scaled
+        ZZ = Z_cs_scaled.T @ Z_cs_scaled
         ridge_matrix = ZZ + penalty * np.eye(p)
-        beta = np.linalg.solve(ridge_matrix, Z_scaled.T @ y_centered)
+        beta = np.linalg.solve(ridge_matrix, Z_cs_scaled.T @ y)
     else: # Dual form (Samples < Features)
-        K = Z_scaled @ Z_scaled.T
+        K = Z_cs_scaled @ Z_cs_scaled.T
         ridge_matrix = K + penalty * np.eye(n)
-        alpha = np.linalg.solve(ridge_matrix, y_centered)
-        beta = Z_scaled.T @ alpha
-        
-    #2. Compute (unrestricted) intercept
-    beta_0 = y_mean 
-    #Add intercept
-    beta = np.hstack([beta_0, beta])
+        alpha = np.linalg.solve(ridge_matrix, y)
+        beta = Z_cs_scaled.T @ alpha
     
-    return beta, Z_mean, Z_std
+    return beta
 
-
-def predict_rff_model(X, Z_mean, Z_std, base_W, params, beta):
+def rff_predict_oos(X, cont_feat_names, oneHot_feat_names, base_W, params, beta):
     """
-    Generate predictions from a fitted RFF + ridge regression model.
-    
-    This function applies the same RFF transformation used during training and
-    then uses the supplied coefficient vector beta to compute predictions.
-    
+    Generate out-of-sample predictions using a fitted RFF + ridge model.
+
+    This function applies the same RFF transformation used during training
+    (same 'base_W', 'sigma', and 'p') and then uses the supplied coefficient
+    vector 'beta' to compute linear predictions.
+
     Parameters
     ----------
-    X : array-like of shape (n_samples, n_features)
-        Input features (pre-RFF) for which predictions are required.
-    base_W : np.ndarray of shape (n_features, p_max // 2)
-        Base frequency matrix from `sample_rff_frequencies`.
+    X : pd.DataFrame
+        Out-of-sample feature data. Must contain:
+          - Continuous columns in 'cont_feat_names'
+          - Optional columns in 'oneHot_feat_names'
+          - An 'eom' column for cross-sectional standardisation in
+            'rff_feature_map'.
+    cont_feat_names : list of str
+        Names of continuous feature columns to transform into RFFs.
+    oneHot_feat_names : list of str
+        Names of one-hot / categorical columns to append unchanged.
+    base_W : np.ndarray
+        Base frequency matrix returned by 'rff_weights', using the same
+        seed and dimensionality as in training.
     params : dict
-        Hyperparameters used for training. Must contain:
-            - 'sigma' : float, kernel bandwidth.
-            - 'p'     : int, total number of RFF features (even).
-    beta : np.ndarray of shape (p + 1,)
-        Coefficient vector from `fit_rff_ridge_model`, with intercept first.
-    
+        Hyperparameters used when fitting the model. Must contain:
+          - 'sigma' : float, kernel bandwidth.
+          - 'p'     : int, total number of RFF features (even).
+    beta : np.ndarray of shape (n_features,)
+        Coefficient vector returned by 'rff_fit_beta'.
+
     Returns
     -------
     y_pred : np.ndarray of shape (n_samples,)
-        Predicted target values.
+        Predicted target values for the rows in 'X'.
     """
-    Z = rff_feature_map(X, base_W, params['sigma'], params['p'])
-    Z_scaled = (Z - Z_mean) / Z_std
+    Z = rff_feature_map(X, cont_feat_names, oneHot_feat_names, base_W, params['sigma'], params['p'])
     
-    return rff_predict(Z_scaled, beta)
+    return rff_predict(Z, beta)
 
 def save_model(filepath, date, params, beta):
     """
-    Appends model date, hyperparameters, and beta coefficients to a text file.
+    Save a single fitted model configuration and its coefficients in a JSON file.
+    No appending is performed. Each call overwrites or creates exactly one file.
+
+    The JSON file contains:
+      - "date"    : string, YYYY-MM-DD
+      - "sigma"   : float, RFF bandwidth
+      - "p"       : int, number of RFF features
+      - "penalty" : float, ridge penalty parameter
+      - "beta"    : list of floats, regression coefficients
+
+    Parameters
+    ----------
+    filepath : str or path-like
+        Base file path (without extension). A '.json' extension is added.
+    date : pd.Timestamp or datetime-like
+        Model date. Only the date component is stored.
+    params : dict
+        Hyperparameter dictionary with keys:
+          - 'sigma'   : float
+          - 'p'       : int
+          - 'penalty' : float
+    beta : np.ndarray
+        Coefficient vector of the fitted model.
     """
-    # Prepare the data dictionary
+
     record = {
-        "date": str(date.date()),          # Convert Pandas Timestamp to string
-        "sigma": float(params['sigma']),   # Ensure native Python float
-        "p": int(params['p']),             # Ensure native Python int
+        "date": str(date.date()),
+        "sigma": float(params['sigma']),
+        "p": int(params['p']),
         "penalty": float(params['penalty']),
-        "beta": beta.tolist()              # Convert Numpy array to Python list
+        "beta": beta.tolist()
     }
-    
-    # Open file in 'append' mode ('a')
-    with open(filepath, 'a') as f:
-        # Write the dictionary as a JSON string, followed by a newline
-        f.write(json.dumps(record) + "\n")
+
+    # Save as a normal JSON file, overwriting if it already exists
+    fullpath = filepath + ".json"
+    with open(fullpath, "w") as f:
+        json.dump(record, f, indent=2)
 
 #%% Preliminaries & Data
 
@@ -282,8 +402,10 @@ def save_model(filepath, date, params, beta):
 settings = GF.get_settings()
 signals = GF.get_signals()
 
+cont_feat_names, oneHot_feat_names = signals[0], signals[1]
+
 #Database
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_processed.db")
 db_Predictions = sqlite3.connect(database=path +"Data/Predictions.db")
 
 #=================================================
@@ -291,13 +413,13 @@ db_Predictions = sqlite3.connect(database=path +"Data/Predictions.db")
 #=================================================
 
 #Load Data
-df_signals, signal_months, trade_idx, feat_cols, \
-    window_size, validation_size, trading_month_start \
+df, signal_months, trading_month_start, feat_cols, \
+    window_size, validation_size  \
         = GF.load_signals_rollingwindow(db_conn = JKP_Factors, #Database with signals
                                         settings = settings, #General settings
-                                        target = 'tr_m_sp500_ld1', #Prediction target
+                                        target = 'tr_Zscore_ld1', #Prediction target
                                         rank_signals = False, #Use ZScores
-                                        trade_start = '2004-01-31', #First trading date
+                                        trade_start = '2003-01-31', #First trading date
                                         trade_end = '2024-12-31', #Last trading date
                                         fill_missing_values = True, #Fill missing values 
                                         )
@@ -318,7 +440,8 @@ trading_dates = signal_months[trading_month_start:]
 seed = 2025
 
 #Naming the Estimator
-file_end = f"LevelTarget_CRSPUniverse_ZScores_RollingWindow_win{window_size}_val{validation_size}_test{test_size}_seed{seed}"
+model_name = "RFF"
+file_end = f"ZscoreTarget_CRSPUniverse_ZScores_RollingWindow_win{window_size}_val{validation_size}_test{test_size}_seed{seed}"
 
 
 #%% RFF Initialisation
@@ -326,12 +449,12 @@ file_end = f"LevelTarget_CRSPUniverse_ZScores_RollingWindow_win{window_size}_val
 # Pre-generate Base Weights (Fixed seed for consistency across time)
 # We need the max p to generate a large enough weight matrix once
 
-base_W_global = rff_weights(len(signals[0]), settings['RFF']['p_vec'].max(), seed=seed)
+base_W_global = rff_weights(cont_feat_names, settings['RFF']['p_vec'].max(), seed=seed)
 
 # Container for predictions
 predictions = []
 
-# Initialize Best Parameters
+# Initialise Best Parameters
 best_params = None
 best_r2 = -np.inf
 
@@ -346,8 +469,8 @@ print("Starting Rolling Forecast...")
 #               Main Rolling Loop
 #=================================================
 
-for date in trading_dates:
-    
+for trade_idx, date in enumerate(trading_dates, start=trading_month_start):
+
     #========================================
     # Get the Data for the Rolling Regression
     #========================================
@@ -355,24 +478,19 @@ for date in trading_dates:
     #Rolling Window Dates
     start_idx = max(0, trade_idx - (window_size + validation_size+1))
     window_months = signal_months[start_idx:trade_idx-1]
-    #Note: we can only use signals up to t-2 since we are predicting next period's targelt. Else-wise: Look-ahead bias (data leakage)
+    #Note: For fitting beta we can only use signals up to t-2 (trading date is date t)
+    #       since we are predicting next period's target. 
+    #       Else-wise: Look-ahead bias (data leakage)
     
     # Split into train / val months
     train_months = window_months[:window_size]
     val_months   = window_months[window_size:]
     
     # Training Data
-    X_train = [df_signals[df_signals['eom'].isin(train_months)][signals[0]].to_numpy(), #continuous features
-               df_signals[df_signals['eom'].isin(train_months)][signals[1]].iloc[:,:-1].to_numpy() #Categorial features (exclude last as a constant is included in the regression)
-               ]
-    y_train = df_signals[df_signals['eom'].isin(train_months)]['tr_m_sp500_ld1'].to_numpy()
+    X_train, y_train_cs, _ = rff_prepare_data(df, train_months, target_col='tr_Zscore_ld1')
     
     #Validation Data
-    X_val = [df_signals[df_signals['eom'].isin(val_months)][signals[0]].to_numpy(), #Continuous Features
-             df_signals[df_signals['eom'].isin(val_months)][signals[1]].iloc[:,:-1].to_numpy() #Categorial Features
-             ]
-    y_val = df_signals[df_signals['eom'].isin(val_months)]['tr_m_sp500_ld1'].to_numpy()
-    
+    X_val,   y_val_cs, _ = rff_prepare_data(df, val_months, target_col='tr_Zscore_ld1')
     
     # Check if we need to Tune (Once a year or first run)
     if months_since_tune >= test_size:
@@ -383,56 +501,53 @@ for date in trading_dates:
         
         print(f"Re-tuning hyperparameters at date {date}...")
         
+        #Initialise objects
         best_r2 = -np.inf
         best_params = None
-    
-        # Center Y once to save time
-        y_mean = np.mean(y_train)
-        y_train_centered = y_train - y_mean
+        
+        #Compute cross-sectionally de-meaned target vector (so no constant required)
+        y_train_cs = y_train_cs['tr_Zscore_ld1'].to_numpy()
+        y_val_cs = y_val_cs['tr_Zscore_ld1'].to_numpy()
     
         for sigma in settings['RFF']['sigma_vec']:
             for p in settings['RFF']['p_vec']:
                 
                 # Compute Training Features
-                Z_train = rff_feature_map(X_train, base_W_global, sigma, p)
-                Z_train_scaled, Z_train_mean, Z_train_std = rff_standardize_feature_map(Z_train)
+                Z_train_cs_scaled = rff_feature_map(X_train, cont_feat_names, oneHot_feat_names, base_W_global, sigma, p)
                 
-                #Validation Features
-                Z_val   = rff_feature_map(X_val, base_W_global, sigma, p)
-                Z_val_scaled = (Z_val - Z_train_mean)/Z_train_std
+                # Compute Validation Features
+                Z_val_cs_scaled   = rff_feature_map(X_val, cont_feat_names, oneHot_feat_names, base_W_global, sigma, p)
                 
-                # --- OPTIMIZATION START ---
-                # Precompute Matrix Products for Ridge (Primal vs Dual)
-                n, n_feat = Z_train.shape
+                #-------------------------------------------------------------- 
+                #---- Precompute Matrix Products for Ridge (Primal vs Dual) ---
+                n, n_feat = Z_train_cs_scaled.shape
                 
                 # Pre-calculate the core matrix to avoid doing it inside penalty loop
                 if n >= n_feat:
                     # Primal
-                    Core_Matrix = Z_train_scaled.T @ Z_train_scaled
-                    XY_corr = Z_train_scaled.T @ y_train_centered
+                    Core_Matrix = Z_train_cs_scaled.T @ Z_train_cs_scaled
+                    XY_corr = Z_train_cs_scaled.T @ y_train_cs
                     is_primal = True
                 else:
                     # Dual
-                    Core_Matrix = Z_train_scaled @ Z_train_scaled.T
+                    Core_Matrix = Z_train_cs_scaled @ Z_train_cs_scaled.T
                     is_primal = False
-                # --- OPTIMIZATION END ---
+                #--------------------------------------------------------------
+                
+                #Loop over penalty which re-uses ZZ.T or Z.TZ (saves many computations)
                 for penalty in settings['RFF']['penalty_vec']:
                     # Fast Solve
                     if is_primal:
                         ridge_matrix = Core_Matrix + penalty * np.eye(n_feat)
-                        beta_coef = np.linalg.solve(ridge_matrix, XY_corr)
+                        beta = np.linalg.solve(ridge_matrix, XY_corr)
                     else:
                         ridge_matrix = Core_Matrix + penalty * np.eye(n)
-                        alpha = np.linalg.solve(ridge_matrix, y_train_centered)
-                        beta_coef = Z_train_scaled.T @ alpha
-                    
-                    # Reconstruct Intercept
-                    beta_0 = y_mean 
-                    beta = np.hstack([beta_0, beta_coef])
+                        alpha = np.linalg.solve(ridge_matrix, y_train_cs)
+                        beta = Z_train_cs_scaled.T @ alpha
                     
                     # Predict
-                    y_val_pred = rff_predict(Z_val_scaled, beta)
-                    current_r2 = oos_r2_score(y_val, y_val_pred)
+                    y_val_pred = rff_predict(Z_val_cs_scaled, beta)
+                    current_r2 = oos_r2_score(y_val_cs, y_val_pred)
     
                     if current_r2 > best_r2:
                         best_r2 = current_r2
@@ -462,14 +577,12 @@ for date in trading_dates:
     #===========================================================
     
     #Get Train + Val Data
-    window_mask = df_signals['eom'].isin(window_months)
-    X_window = [df_signals.loc[window_mask, signals[0]],
-                df_signals.loc[window_mask, signals[1]].iloc[:,:-1]
-                ]
-    y_window = df_signals.loc[window_mask, 'tr_m_sp500_ld1']
+    X_window, y_window_cs, window_meta = rff_prepare_data(df, window_months,
+                                                    target_col='tr_Zscore_ld1')
     
     #Compute beta
-    beta, Z_mean_win, Z_std_win = rff_fit_beta(X_window, y_window, base_W_global, best_params)
+    beta = rff_fit_beta(X_window, y_window_cs['tr_Zscore_ld1'].to_numpy(),
+                        cont_feat_names, oneHot_feat_names, base_W_global, best_params)
         
     
     #===========================================================
@@ -477,13 +590,11 @@ for date in trading_dates:
     #===========================================================
     
     # Make the next month prediction for the out-of-sample period 
-    test_mask = (df_signals['eom'] == date - pd.offsets.MonthEnd(1))  # or == date, after you verify
-    X_test = [df_signals.loc[test_mask, signals[0]], 
-              df_signals.loc[test_mask, signals[1]].iloc[:,:-1]
-              ]
-    ids_test = df_signals.loc[test_mask, ['id', 'eom']]
+    test_mask = (df['eom'] == date - pd.offsets.MonthEnd(1))  # or == date, after you verify
+    X_test = df.loc[test_mask].sort_values(by = ['eom', 'id'])
+    ids_test = X_test[['id', 'eom']]
     
-    y_test_pred = predict_rff_model(X_test, Z_mean_win, Z_std_win, base_W_global, best_params, beta)
+    y_test_pred = rff_predict_oos(X_test, cont_feat_names, oneHot_feat_names, base_W_global, best_params, beta)
     
     
     #===========================================================
@@ -496,16 +607,13 @@ for date in trading_dates:
     predictions.append(pred_df)
     
     #Save Model
-    save_model(path + f"Models/RFF/RFF_{file_end}_{date.strftime('%Y%m%d')}", date, best_params, beta)
-    
-    #Increment index due to new trading_month
-    trade_idx += 1
+    save_model(path + f"Models/RFF/RFF_{file_end}_date_{date.strftime('%Y%m%d')}", date, best_params, beta)
 
 
 #%% Save Predictions
 df_predictions = pd.concat(predictions)
 
-df_predictions.to_sql(name = f"RFF_{file_end}",
+df_predictions.to_sql(name = f"{model_name}_{file_end}",
                    con = db_Predictions,
                    index = False,
                    if_exists = 'append')
