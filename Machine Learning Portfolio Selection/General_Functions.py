@@ -22,7 +22,7 @@ def get_settings():
                                   },
                    'RFF': {'p_vec':np.array([2**i for i in range(6,11)]),
                            'sigma_vec': np.array([0.5,1,10,50]),
-                           'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1e3, 1e4, 1e5])
+                           'penalty_vec':np.array([1e-3, 1e-1, 1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7])
                            },
                    'gamma': 5.0
                    }
@@ -515,4 +515,4 @@ def load_signals_rollingwindow(
     # Find the index of the first trading date in the signal months array
     trade_idx = np.searchsorted(signal_months, trading_dates[0])
 
-    return df_signals, signal_months, trade_idx, feat_cols, window_size, validation_size, trade_idx
+    return df_signals, signal_months, trade_idx, feat_cols, window_size, validation_size
