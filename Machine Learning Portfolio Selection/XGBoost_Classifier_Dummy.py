@@ -34,7 +34,7 @@ import General_Functions as GF
 #=================================================
 
 #Database
-JKP_Factors = sqlite3.connect(database=path +"Data/JKP_clean.db")
+JKP_Factors = sqlite3.connect(database=path +"Data/JKP_processed.db")
 db_Predictions = sqlite3.connect(database=path +"Data/Predictions.db")
 
 
@@ -43,73 +43,60 @@ settings = GF.get_settings()
 signals = GF.get_signals()
 feat_cols = signals[0] + signals[1] #Continuous and Categorical Features
 
+#=================================================
+#               Read in Data
+#=================================================
+
+#Target
+target_col = 'tr_m_sp500_ld1_Dummy'
+
+#Load Data
+df, signal_months, trading_month_start, feat_cols, \
+    window_size, validation_size  \
+        = GF.load_signals_rollingwindow(db_conn = JKP_Factors,          #Database with signals
+                                        settings = settings,            #General settings
+                                        target = target_col,            #Prediction target
+                                        rank_signals = True,            #Use ZScores
+                                        trade_start = '2003-01-31',     #First trading date
+                                        trade_end = '2024-12-31',       #Last trading date
+                                        fill_missing_values = False,    #Fill missing values 
+                                        )
 
 #=================================================
 #           Rolling Window Parameters
 #=================================================
+
 
 #Window Size and Validation Periods for rolling window
 window_size = settings['rolling_window']['window_size']
 validation_size = settings['rolling_window']['validation_periods'] 
 test_size = settings['rolling_window']['test_size'] #Periods until hyperparameters are re-tuned. Fine-tuning is done monthly
 
-trade_start = settings['rolling_window']['trading_start']
-trade_end = settings['rolling_window']['trading_end']
-trading_dates = pd.date_range(trade_start, trade_end, freq = 'ME')
-
+#Trading Dates
+trading_dates = signal_months[trading_month_start:]
 
 #=================================================
-#               Model Type
+#        Model Type (Requires Manual Naming)
 #=================================================
 model_name = "XGBClass"
-target_type = "BinaryTarget"
+target_type = "trmsp500DummyTarget"
 file_end = f"CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
 
 
-#=================================================
-#               Read in Data
-#=================================================
-
-#Read in processed signals
-query = ("SELECT * FROM Signals_Rank "
-         f"WHERE eom >= '{(trade_start-pd.offsets.MonthEnd(window_size+validation_size+1)).strftime("%Y-%m-%d")}' AND eom <= '{(trade_end + pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'")
-df = pd.read_sql_query(query,
-                               con = JKP_Factors,
-                               parse_dates = {'eom'})
-
-#Read in Targets
-query = ("SELECT id, eom, tr_m_sp500_ld1_Dummy FROM Factors_processed "
-         f"WHERE eom >= '{(trade_start-pd.offsets.MonthEnd(window_size+validation_size+1)).strftime("%Y-%m-%d")}' AND eom <= '{(trade_end + pd.offsets.MonthEnd(1)).strftime("%Y-%m-%d")}'")
-df_targets = pd.read_sql_query(query,
-                               con = JKP_Factors,
-                               parse_dates = {'eom'})
-
-    
-#Merge to signals (Merging in Python was quicker than via SQL)
-df = (df.merge(df_targets, on = ['id','eom'], how = 'left')
-      .dropna(subset=['tr_m_sp500_ld1_Dummy'])
-      .sort_values(by = ['eom','id'])
-      )
-
-if df['tr_m_sp500_ld1_Dummy'].isna().sum() > 0:
-    print("ERROR: Missing Values in Target. Training cannot be initiated")
-del df_targets
-
-
-#Extract unique Months of signals
-signal_months = df['eom'].sort_values().unique()
-
-#Extract index of trading start
-trade_idx = signal_months.searchsorted(trade_start)
-
 #%% XGBoost Preparation
+
+def prepare_data(df, months, target_col):
+    X = df[df['eom'].isin(months)][feat_cols].to_numpy()
+    y = df[df['eom'].isin(months)][target_col].to_numpy().astype(int)
+    
+    return X, y
 
 #=================================================
 #          XGBoost Binary Classification
 #=================================================
 
 #Optuna Objective Function
-def make_objective(X_train, y_train, X_val, y_val):
+def make_objective(X_train, y_train, X_val, y_val, scale_pos_weight_base):
 
     def objective(trial):
         params = {
@@ -117,14 +104,21 @@ def make_objective(X_train, y_train, X_val, y_val):
             "tree_method": "hist",
             "n_jobs": -1,
             "random_state": 2025,
-            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.2, log=True),
-            "max_depth": trial.suggest_int("max_depth", 2, 8),
-            "min_child_weight": trial.suggest_float("min_child_weight", 0.1, 10.0),
+            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.05, log=True),
+            "max_depth": trial.suggest_int("max_depth", 2, 6),
+            "min_child_weight": trial.suggest_float("min_child_weight", 1.0, 50.0, log=True),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "gamma": trial.suggest_float("gamma", 0.0, 10.0),
             "reg_alpha": 0,  # no L1
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 1e3, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 100.0, log=True),
+            
+            # Class imbalance weighting
+            "scale_pos_weight": trial.suggest_float(
+                "scale_pos_weight",
+                0.5 * scale_pos_weight_base,
+                2.0 * scale_pos_weight_base
+            ),
 
             # FIX n_estimators (M) to a high value; early stopping decides effective M
             "n_estimators": 500,
@@ -161,7 +155,7 @@ saved_best_params = None
 saved_best_n_estimators = None
 
 #Loop over dates (Rolling Window)
-for date in trading_dates:
+for trade_idx, date in enumerate(trading_dates, start=trading_month_start):
 
     #========================================
     # Get the Data for the Rolling Model
@@ -176,25 +170,30 @@ for date in trading_dates:
     train_months = window_months[:window_size]
     val_months   = window_months[window_size:]
 
-    # Training Data (BINARY TARGET)
-    X_train = df[df['eom'].isin(train_months)][feat_cols].to_numpy()
-    y_train = df[df['eom'].isin(train_months)]['tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
-
-    #Validation Data (BINARY TARGET)
-    X_val = df[df['eom'].isin(val_months)][feat_cols].to_numpy()
-    y_val = df[df['eom'].isin(val_months)]['tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
+    # Training Data
+    X_train, y_train = prepare_data(df, train_months, target_col)
+    
+    #Validation Data
+    X_val, y_val = prepare_data(df, val_months, target_col) 
 
     #======================================================
     #     Hyperparameter tuning every `test_size` months
     #======================================================
     if months_since_tune >= test_size:
+        
+        # ---------------------------------------------------
+        # Class imbalance for this training window
+        # ---------------------------------------------------
+        pos = np.sum(y_train == 1)
+        neg = np.sum(y_train == 0)
+        scale_pos_weight_base = neg / max(pos, 1)  # avoid division by zero
 
         print(f"Re-tuning hyperparameters at date {date}...")
 
         # Run Optuna tuning
         study = optuna.create_study(direction="minimize")
-        objective = make_objective(X_train, y_train, X_val, y_val)
-        study.optimize(objective, n_trials=10)
+        objective = make_objective(X_train, y_train, X_val, y_val, scale_pos_weight_base)
+        study.optimize(objective, n_trials=15)
 
         # Extract optimal hyperparameters
         best_params = study.best_params.copy()
@@ -235,12 +234,10 @@ for date in trading_dates:
     #===========================================================
 
     #Get Train + Val Data
-    window_mask = df['eom'].isin(window_months)
-    X_window = df.loc[window_mask, feat_cols].to_numpy()
-    y_window = df.loc[window_mask, 'tr_m_sp500_ld1_Dummy'].to_numpy().astype(int)
+    X_window, y_window = prepare_data(df, window_months, target_col)
 
     #Train the Model given the hyperparameters
-    final_model = XGBClassifier(**best_params)  # <--- CHANGED
+    final_model = XGBClassifier(**best_params)
     final_model.fit(X_window, y_window)
 
     #===========================================================
@@ -254,7 +251,7 @@ for date in trading_dates:
 
     # Predicted probability of positive return (class 1)
     y_test_proba = final_model.predict_proba(X_test)[:, 1]
-    # Hard classification with 0.5 threshold (adjust if needed)
+    # Hard classification with 0.5 threshold
     y_test_pred = (y_test_proba >= 0.5).astype(int)
 
     #===========================================================
@@ -263,8 +260,8 @@ for date in trading_dates:
 
     #At 'eom', predict dummy for 'eom'+1
     pred_df = ids_test.copy()
-    pred_df['prob_up'] = y_test_proba     # <--- probability of positive return
-    pred_df['dummy_pred'] = y_test_pred   # <--- predicted class (0/1)
+    pred_df['prob_up'] = y_test_proba     # probability of positive return
+    pred_df['dummy_pred'] = y_test_pred   # predicted class (0/1)
     predictions.append(pred_df)
 
     # Save the model for this date
@@ -274,9 +271,6 @@ for date in trading_dates:
     # Dump tree structure in text format
     tree_path = os.path.join(path, "Models/XGBoost/", f"{model_name}_trees_{target_type}_{file_end}_date_{date.strftime('%Y%m%d')}.txt")
     final_model.get_booster().dump_model(tree_path)
-
-    #Increment index due to new trading_month
-    trade_idx += 1
 
 #%% Save Predictions
 df_predictions = pd.concat(predictions)

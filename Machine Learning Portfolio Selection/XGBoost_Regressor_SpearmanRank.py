@@ -103,7 +103,7 @@ df, signal_months, trading_month_start, feat_cols, \
     window_size, validation_size  \
         = GF.load_signals_rollingwindow(db_conn = JKP_Factors,          #Database with signals
                                         settings = settings,            #General settings
-                                        target = 'tr_ld1',            #Prediction target
+                                        target = 'tr_ld1',              #Prediction target
                                         rank_signals = True,            #Use ZScores
                                         trade_start = '2003-01-31',     #First trading date
                                         trade_end = '2024-12-31',       #Last trading date
@@ -173,13 +173,13 @@ def make_objective(X_train, y_train, X_val, y_val, group_val):
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "gamma": trial.suggest_float("gamma", 0.0, 1.0), #Too few splits = Too few buckets and very coarse rank prediction
             "reg_alpha": 0,  # no L1
-            "reg_lambda": trial.suggest_float("reg_lambda", 0.001, 5.0, log=True), #too high penalty might overflatten the score
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.0001, 5.0, log=True), #too high penalty might overflatten the score
             
             # FIX n_estimators (M) to a high value high; early stopping decides the effective number of M
-            "n_estimators": 1_000,
+            "n_estimators": 500,
             #"n_estimators": trial.suggest_int("n_estimators", 10, 150),
             "eval_metric": "rmse",
-            'early_stopping_rounds': 100
+            'early_stopping_rounds': 50
         }
 
         model = XGBRegressor(**params)
@@ -254,7 +254,7 @@ for trade_idx, date in enumerate(trading_dates, start=trading_month_start):
         # Run Optuna tuning
         study = optuna.create_study(direction="minimize")
         objective = make_objective(X_train, y_train, X_val, y_val, group_val)
-        study.optimize(objective, n_trials=20)
+        study.optimize(objective, n_trials=15)
     
         # Extract optimal hyperparameters
         best_params = study.best_params.copy()
