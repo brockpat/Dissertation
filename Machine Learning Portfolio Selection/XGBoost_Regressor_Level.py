@@ -81,6 +81,7 @@ trading_dates = signal_months[trading_month_start:]
 model_name = "XGBReg"
 target_type = "ZscoreTarget"
 file_end = f"CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
+prediction_name = "ret_pred_Zscore"
 
 #%% Functions
 
@@ -249,7 +250,7 @@ for trade_idx, date in enumerate(trading_dates, start=trading_month_start):
     
     #At 'eom', predict return for 'eom'+1
     pred_df = ids_test.copy()
-    pred_df['ret_pred'] = y_test_pred
+    pred_df[prediction_name] = y_test_pred
     predictions.append(pred_df)
     
     # Save the model for this date

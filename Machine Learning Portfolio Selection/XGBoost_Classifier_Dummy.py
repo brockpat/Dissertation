@@ -261,7 +261,7 @@ for trade_idx, date in enumerate(trading_dates, start=trading_month_start):
     #At 'eom', predict dummy for 'eom'+1
     pred_df = ids_test.copy()
     pred_df['prob_up'] = y_test_proba     # probability of positive return
-    pred_df['dummy_pred'] = y_test_pred   # predicted class (0/1)
+    #pred_df['dummy_pred'] = y_test_pred   # predicted class (0/1)
     predictions.append(pred_df)
 
     # Save the model for this date
