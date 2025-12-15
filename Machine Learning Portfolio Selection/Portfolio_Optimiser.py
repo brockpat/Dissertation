@@ -46,6 +46,11 @@ import torch.nn.functional as F
 
 import statsmodels.api as sm
 
+#Saving results
+from copy import deepcopy
+import json
+import re
+
 #Custom Functions
 import os
 os.chdir(path + "Code/")
@@ -62,7 +67,7 @@ include_rf_asset = False
 if include_rf_asset:
     new_permno = 100_000 #Fictional permno of risk-free asset. Must not overlap with any existing permno in the investable universe
 
-#%% Functions
+#%% Functions: Portfolio Selection
 
 def get_universe_partitions(prev_date, date, df_pf_weights):
     """
@@ -99,133 +104,6 @@ def get_universe_partitions(prev_date, date, df_pf_weights):
     zeros = leavers.copy()
     
     return stayers, leavers, newcomers, active, zeros
-
-    
-def scale_return_predictions(df_predictions, sp500_constituents, 
-                  trading_start:str, trading_end:str, rank_cols:list,
-                  target_col):
-    """
-    Linearly combine model predictions to match realised returns.
-
-    This function:
-
-    1. Merges realised (excess) returns into the prediction dataframe.
-    2. Restricts the universe to S&P 500 constituents at each month.
-    3. Rescales rank predictions cross-sectionally into
-       the interval ``[-1, 1]`` via percentile ranks.
-    4. Runs a rolling cross-sectional OLS to map the (scaled) predictions
-       into actual target excess returns, and uses the estimated
-       coefficients to generate out-of-sample scaled predictions.
-
-    The regression is re-estimated annually using a one-year rolling window,
-    and the resulting fitted values are stored in the column
-    ``'ret_pred_scaled'``.
-
-    Args:
-        df_predictions: DataFrame with at least columns ``['id', 'eom']`` and
-            one or more prediction columns.
-        sp500_constituents: DataFrame with S&P 500 membership information.
-            Must contain ``['eom', 'id']`` indicating which stocks are in the
-            index at each month.
-        trading_start: Start date for the
-            trading / backtest period. Used to define the first regression
-            re-estimation date.
-        trading_end: End date (string parsable by pandas) for the
-            trading / backtest period.
-        rank_cols: List of column names in ``df_predictions`` whose values
-            must be rescaled to ``[-1, 1]`` as they are rank predictions.
-        target_col: Name of the realised return column in the JKP database
-            to be used as the regression target, e.g. excess return over
-            the SP500 next month (default ``'tr_m_sp500_ld1'``).
-
-    Returns:
-        pd.DataFrame: DataFrame with the same identifier structure as
-        ``df_predictions``, plus:
-
-            - the realised target column ``target_col``
-            - the column ``'ret_pred_scaled'`` containing the OOS
-              predicted excess returns from the rolling OLS.
-
-        Only rows with non-missing scaled predictions and targets are kept.
-    """
-    
-    #------------------
-    #   Data Assembly
-    #------------------
-    # Get target data
-    df_target = pd.read_sql_query(f"SELECT id, eom, {target_col} FROM Factors_processed WHERE eom >='{df_predictions.eom.min().strftime('%Y-%m-%d')}'",
-                               con = JKP_Factors,
-                               parse_dates = {'eom'})
-    
-    # Merge actual returns to predictions
-    df = df_predictions.merge(df_target[['id','eom', target_col]],
-                              on = ['id','eom'], how = 'left')
-    
-    # Save Workspace
-    del df_target
-    
-    # Only keep S&P500 stocks (active universe)
-    df = (df
-          .merge(sp500_constituents.assign(in_sp500 = True), 
-                 on = ['eom', 'id'], how = 'left')
-          .dropna(subset = ('in_sp500'))
-          .drop(columns = 'in_sp500')
-          )
-    
-    if rank_cols != None:
-        # Re-scale rank predictions to [-1,1] in the cross-section
-        df[rank_cols] = (df.groupby('eom')[rank_cols]
-                         .transform(lambda x: 2 * x.rank(pct=True) - 1)
-                         )
-    
-    #------------------
-    #   Regression
-    #------------------
-    #Container to store regression results
-    reg_results = []
-    
-    #Dates at which the coefficients are re-trained
-    reg_dates = pd.date_range(start=trading_start,
-                                  end=trading_end,
-                                  freq='YE'
-                                  )-pd.offsets.MonthEnd(11)
-    
-    #Loop over re-training dates
-    for date in reg_dates:
-        
-        # Dates on which the the coefficients are trained on
-        train_start = max(date - pd.offsets.MonthEnd(2+12),df['eom'].min())
-        train_end = date-pd.offsets.MonthEnd(2)
-        
-        # Dates of OOS fitted values
-        pred_start = date-pd.offsets.MonthEnd(1)
-        pred_end = date + pd.offsets.MonthEnd(10)
-        
-        # Get Train and Prediction Data
-        train_data = df.loc[df['eom'].between(train_start, train_end, inclusive='both')]
-        pred_data  = df.loc[df['eom'].between(pred_start, pred_end, inclusive='both')]
-        
-        # Prepare Training Data (Add Constant)
-        X_train = sm.add_constant(train_data[train_data.columns.drop(['id','eom', target_col])])
-        y_train = train_data[target_col]
-        
-        # Fit the Model (OLS)
-        model = sm.OLS(y_train, X_train).fit()
-        
-        # Make predictions (add constant)
-        X_pred = sm.add_constant(pred_data[pred_data.columns.drop(['id','eom', target_col])], has_constant='add')
-        pred_data['ret_pred_scaled'] = model.predict(X_pred)
-        
-        # Store results
-        reg_results.append(pred_data)
-    
-    # Concatenate dataframes
-    reg_df = pd.concat(reg_results)
-    
-    #Drop missing predictions
-    reg_df = reg_df.dropna().drop_duplicates(subset = ['id','eom']).drop(columns = target_col)
-
-    return reg_df
 
 def optimise_portfolio(
     df_pf_weights: pd.DataFrame,
@@ -302,7 +180,7 @@ def optimise_portfolio(
             - Kyle's lambda
             - lagged G_t π_{t-1} (pi_g_tm1)
             - realised end-of-period return ``tr``
-            - predicted revenue ``rev = π_t * tr``
+            - Realised revenue ``rev = π_t * tr``
             - transaction cost ``tc``
 
         The returned dataframe aggregates the strategy for all trading dates.
@@ -317,7 +195,8 @@ def optimise_portfolio(
     df_strategy = []    
     
     # Scale Transaction costs
-    df_kl['lambda'] = df_kl['lambda'].copy()*tc_scaler
+    df_kl = df_kl.copy() #avoid overwriting the function input
+    df_kl['lambda'] = df_kl['lambda']*tc_scaler
 
     #Loop over trading date
     for date in trading_dates:
@@ -763,7 +642,7 @@ def solve_pf_optimisation(prev_date, date,
     # --- Scalers for Inequality Constraints ----
     penalty_maxPi   = 1.0
     penalty_minPi   = 1.0
-    penalty_var     = 0.1
+    penalty_var     = 1.0
 
     # ---- Optimizer ----
     optimizer = torch.optim.Adam([pi_logits], lr=1e-2)
@@ -787,7 +666,7 @@ def solve_pf_optimisation(prev_date, date,
         max_pi_violation = (penalty_maxPi * F.relu(pi - max_pi)).sum()
         min_pi_violation = (penalty_minPi * F.relu(min_pi - pi)).sum()
         
-        # Variance Violation        
+        # Variance Violation  
         var_violation = penalty_var * F.relu(pi @ S @ pi - max_var)
 
         # Loss Function
@@ -888,6 +767,158 @@ def inclue_rf(df_pf_weights, df_kl, df_retPred, df_returns,
     
     return df, df_kl, df_retPred, df_returns
 
+#%% Function: Return Predictions
+def scale_return_predictions(df_predictions, sp500_constituents, 
+                  trading_start:str, trading_end:str,
+                  predictor_col,
+                  target_col):
+    """
+    Linearly combine model predictions to match realised returns.
+
+    This function:
+
+    1. Merges realised (excess) returns into the prediction dataframe.
+    2. Restricts the universe to S&P 500 constituents at each month.
+    3. Rescales rank predictions cross-sectionally into
+       the interval ``[-1, 1]`` via percentile ranks.
+    4. Runs a rolling cross-sectional OLS to map the (scaled) predictions
+       into actual target excess returns, and uses the estimated
+       coefficients to generate out-of-sample scaled predictions.
+
+    The regression is re-estimated annually using a one-year rolling window,
+    and the resulting fitted values are stored in the column
+    ``'ret_pred_scaled'``.
+
+    Args:
+        df_predictions: DataFrame with at least columns ``['id', 'eom']`` and
+            one or more prediction columns.
+        sp500_constituents: DataFrame with S&P 500 membership information.
+            Must contain ``['eom', 'id']`` indicating which stocks are in the
+            index at each month.
+        trading_start: Start date for the
+            trading / backtest period. Used to define the first regression
+            re-estimation date.
+        trading_end: End date (string parsable by pandas) for the
+            trading / backtest period.
+        rank_cols: List of column names in ``df_predictions`` whose values
+            must be rescaled to ``[-1, 1]`` as they are rank predictions.
+        target_col: Name of the realised return column in the JKP database
+            to be used as the regression target, e.g. excess return over
+            the SP500 next month (default ``'tr_m_sp500_ld1'``).
+
+    Returns:
+        pd.DataFrame: DataFrame with the same identifier structure as
+        ``df_predictions``, plus:
+
+            - the realised target column ``target_col``
+            - the column ``'ret_pred_scaled'`` containing the OOS
+              predicted excess returns from the rolling OLS.
+
+        Only rows with non-missing scaled predictions and targets are kept.
+    """
+    
+    #------------------
+    #   Data Assembly
+    #------------------
+    # Get target data
+    df_target = pd.read_sql_query(f"SELECT id, eom, {target_col} FROM Factors_processed WHERE eom >='{df_predictions.eom.min().strftime('%Y-%m-%d')}'",
+                               con = JKP_Factors,
+                               parse_dates = {'eom'})
+    
+    # Merge actual returns to predictions
+    df = df_predictions.merge(df_target[['id','eom', target_col]],
+                              on = ['id','eom'], how = 'left')
+    
+    # Save Workspace
+    del df_target
+    
+    # Only keep S&P500 stocks (active universe)
+    df = (df
+          .merge(sp500_constituents.assign(in_sp500 = True), 
+                 on = ['eom', 'id'], how = 'left')
+          .dropna(subset = ('in_sp500'))
+          .drop(columns = 'in_sp500')
+          .get(['id','eom', predictor_col, target_col])
+          )
+    
+    #------------------
+    #   Regression
+    #------------------
+    #Container to store regression results
+    reg_results = []
+    
+    #Dates at which the coefficients are re-trained
+    reg_dates = pd.date_range(start=trading_start,
+                                  end=trading_end,
+                                  freq='YE'
+                                  )-pd.offsets.MonthEnd(11)
+    
+    #Loop over re-training dates
+    for date in reg_dates:
+        
+        # Dates on which the the coefficients are trained on
+        train_start = max(date - pd.offsets.MonthEnd(2+12),df['eom'].min())
+        train_end = date-pd.offsets.MonthEnd(2)
+        
+        # Dates of OOS fitted values
+        pred_start = date-pd.offsets.MonthEnd(1)
+        pred_end = date + pd.offsets.MonthEnd(10)
+        
+        # Get Train and Prediction Data
+        train_data = df.loc[df['eom'].between(train_start, train_end, inclusive='both')]
+        pred_data  = df.loc[df['eom'].between(pred_start, pred_end, inclusive='both')]
+        
+        # Prepare Training Data (Add Constant)
+        X_train = sm.add_constant(train_data[train_data.columns.drop(['id','eom', target_col])])
+        y_train = train_data[target_col]
+        
+        # Fit the Model (OLS)
+        model = sm.OLS(y_train, X_train).fit()
+        
+        # Make predictions (add constant)
+        X_pred = sm.add_constant(pred_data[pred_data.columns.drop(['id','eom', target_col])], has_constant='add')
+        pred_data[predictor_col + "_rescaled"] = model.predict(X_pred)
+        
+        # Store results
+        reg_results.append(pred_data)
+    
+    # Concatenate dataframes
+    reg_df = pd.concat(reg_results)
+    
+    #Drop missing predictions
+    reg_df = reg_df.dropna().drop_duplicates(subset = ['id','eom']).drop(columns = target_col)
+    
+    #Drop unscaled variable
+    reg_df = reg_df.drop(columns = predictor_col)
+    
+    return reg_df
+#%% Function: Saving Output
+def value_to_token(v):
+    """Convert Python value to a compact string token for filenames."""
+    if isinstance(v, bool):
+        return str(v).lower()          # True -> "true", False -> "false"
+    if v is None:
+        return "None"
+    if isinstance(v, float):
+        # Example: 0.15 -> "015", 1.0 -> "10"
+        s = f"{v:.3f}".rstrip("0").rstrip(".")  # "0.15"
+        return s.replace(".", "")               # "015"
+    return str(v)
+
+def settings_string(settings: dict) -> str:
+    # Preserve insertion order (Python 3.7+)
+    parts = [f"{k}={value_to_token(v)}" for k, v in settings.items()]
+    return "_".join(parts)
+
+def settings_to_id(settings: dict) -> str:
+    """
+    File-system friendly ID based on settings (used in filenames).
+    """
+    s = json.dumps(settings, sort_keys=True)
+    # Replace anything non-alphanumeric with underscores
+    s = re.sub(r"[^0-9a-zA-Z]+", "_", s).strip("_")
+    return s
+
 #%% Read in Data
 
 #DataBases
@@ -957,24 +988,42 @@ df_pf_weights, df_kl, df_me, df_returns,\
 #==================================================
 #      Model Predictions (Requires Manual Updating)
 #==================================================
-    
-ensemble = [#"XGBClass_trmsp500DummyTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12",
-            #"XGBReg_LevelTrMsp500Target_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12",
-            #"XGBReg_RankTrTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12",
-            "XGBReg_ZscoreTrTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12"]
-#XGBoost_LevelTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12
 
+estimators = [
+          # Baseline
+          'XGBReg_LevelTrMsp500Target_HPlenient_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
+          # Robustness Estimation Universe (CRSP vs. SP500)
+          'XGBReg_LevelTrMsp500Target_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12',
+          # Robustness variable
+          'XGBReg_ZscoreTarget_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
+          # Robustness variable & Est. Univ
+          'XGBReg_ZscoreTrTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12'
+          ]
+
+estimators = ['TransformerSet_LevelTrMsp500Target_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12']
 
 #Load return predictions
 #At 'eom', predictions are for eom+1
-df_retPred = GF.load_MLpredictions(Models, ensemble) 
+df_retPred = GF.load_MLpredictions(Models, estimators) 
 
-df_retPred = scale_return_predictions(df_retPred, sp500_constituents, 
-                  trading_start, trading_end, rank_cols = None,
-                  target_col = 'tr_ld1')  
+#Get names of return predictors
+prediction_cols = list(df_retPred.columns.drop(['id','eom']).astype('string'))
 
-#!!! Choose the correct name based on the selection method !!!
-prediction_col = 'ret_pred_scaled'
+#--- Rescale Zscores ----
+for predictor_col in [s for s in prediction_cols if "Zscore" in s]:
+    
+    reg_df = scale_return_predictions(df_retPred, sp500_constituents, 
+                      trading_start, trading_end,
+                      predictor_col,
+                      target_col = 'tr_ld1')  
+    
+    df_retPred = df_retPred.merge(reg_df[['id','eom',predictor_col+"_rescaled"]],
+                                  on = ['id','eom'], how = 'left').drop(columns = predictor_col)
+
+df_retPred = df_retPred.dropna().reset_index(drop = True)
+
+#Update prediction_cols name
+prediction_cols = list(df_retPred.columns.drop(['id','eom']).astype('string'))
 
 
 #=======================================================
@@ -987,62 +1036,268 @@ if include_rf_asset:
 
 #%% Compute Optimal Portfolio
 
-df_strategy, df_pf_weights \
-    = optimise_portfolio(df_pf_weights, df_kl, df_me, dict_barra, df_returns, df_wealth, df_spy, 
-                       df_retPred, trading_dates, prediction_col, include_rf_asset,
-                       flat_MaxPi = True, flat_MaxPi_limit = 0.15, #portfolio weight bound  [0,flat_MaxPi_limit] for every stock
-                       w_upperLimit = None, w_lowerLimit = None, #Benchmark dependent portfolio bound for every stock
-                       vol_scaler = 1.0,
-                       tc_scaler = 1.0)
+#---- Common Settings for This Run (same for all models) ----
+run_settings = dict(includeRF    = include_rf_asset,
+                    flatMaxPi    = True,
+                    flatMaxPiVal = 0.15,
+                    Wmax         = None,
+                    Wmin         = None,
+                    volScaler    = 1,
+                    tcScaler     = 0.0, 
+                    )
 
-#%% Display Results
+print("Run ID:", settings_to_id(run_settings))
+print("Settings:", settings_string(run_settings))
 
-#Compute cumulative monthly profit for strategy
-df_profit = (df_strategy
-             .groupby('eom')
-             .apply(lambda df: (df['rev'] - df['tc']).sum(), include_groups = False)
-             .reset_index()
-             .rename(columns = {0: 'strategy_profit'})
-             )
-df_profit['cumulative_return'] = (1 + df_profit['strategy_profit']).cumprod() - 1
+#---- Save empty portfolio weights ----
+df_pf_weights_base = df_pf_weights.copy()
 
-#Compute cumulative monthly profit for benchmark
-df_spy = df_spy[df_spy['eom'].isin(df_profit['eom'].unique())]
-df_spy['cumulative_return'] = (1 + df_spy['ret']).cumprod() - 1
+#---- Containers to collect results across models ----
+per_model_returns   = {}   # model_name -> df_ret_strat
+per_model_strategy  = {}   # model_name -> df_strategy
+per_model_metrics   = []   # list of dicts with metrics
 
-#Plot Comparison to Benchmark
-plt.plot(df_profit['eom'], df_profit['cumulative_return'], label ='strategy')
-plt.plot(df_profit['eom'], df_spy['cumulative_return'], label ='SPY')
+#---- Benchmark cumulative returns ----
+df_spy_run = (df_spy[df_spy['eom'].between(trading_start, trading_end)]
+              .assign(cumulative_return = lambda df: (1.0 + df['ret']).cumprod()
+                      )
+              )
+    
+for model_name, prediction_col in zip(estimators, prediction_cols):
+    print("\n==============================")
+    print("Running model:", model_name)
+    print("    Prediction column:", prediction_col)
+    print("==============================")
+    
+    # Use a fresh copy of the initial weights for each model
+    df_pf_weights = df_pf_weights_base.copy()
+    
+    #---- Compute Optimal Portfolio ----
+    df_strategy, df_pf_weights \
+        = optimise_portfolio(df_pf_weights, df_kl, df_me, dict_barra, df_returns, df_wealth, df_spy, 
+                           df_retPred, 
+                           trading_dates, 
+                           prediction_col, 
+                           run_settings['includeRF'],
+                           run_settings['flatMaxPi'], 
+                           run_settings['flatMaxPiVal'], #portfolio weight bound  [0,flat_MaxPi_limit] for every stock
+                           run_settings['Wmax'], 
+                           run_settings['Wmin'], #Benchmark dependent portfolio bound for every stock
+                           run_settings['volScaler'],
+                           run_settings['tcScaler'])
+        
+    # Merge predicted returns
+    df_strategy = df_strategy.merge(df_retPred.get(['id','eom',prediction_col])
+                                    .assign(eom = lambda df: df['eom'] + pd.offsets.MonthEnd(1)),
+                                    on = ['id', 'eom'], how = 'left')
+    
+    #--- Compute strategy returns (net & gross) per month ---
+    df_ret_strat = (
+        df_strategy
+        .assign(ret_net_row = lambda df: df['rev'] - df['tc'])
+        .groupby('eom', as_index=False)
+        .agg(
+            ret_net   = ('ret_net_row', 'sum'),
+            ret_gross = ('rev', 'sum')
+        )
+        .assign(
+            cumret_net   = lambda df: (1.0 + df['ret_net']).cumprod(),
+            cumret_gross = lambda df: (1.0 + df['ret_gross']).cumprod()
+        )
+    )
+    
+    # Compute cumulative monthly profit for benchmark
+    df_ret_bench = (df_spy[df_spy['eom'].isin(df_ret_strat['eom'].unique())]
+                           .assign(cumulative_return = lambda df: (1+df['ret']).cumprod())
+                           .reset_index(drop = True)
+                           )
+    
+    #---- Compute Performance Measures ----
+    
+    # Sharpe Ratio
+    mu_strategy, sigma_strategy, Sharpe_strategy = GF.SharpeRatio(df_ret_strat, risk_free, 
+                                                                  return_col = 'ret_gross')
+    mu_benchmark, sigma_benchmark, Sharpe_benchmark = GF.SharpeRatio(df_ret_bench, risk_free, 
+                                                                  return_col = 'ret')
+    
+    # Information Ratio
+    information_ratio = GF.InformationRatio(df_ret_strat, df_ret_bench, 'ret_gross', 'ret', risk_free)
+    
+    """
+    An IR = 0.5 means:
+    
+    For every 1% of tracking error (volatility of return relative to the benchmark), your portfolio earns 0.5% of excess return on average per year.
+    
+    Put differently:
+    
+    The strategy adds 0.5 units of active return per unit of active risk.
+    """
+    
+    # turnover
+    turnover = GF.TurnoverAUMweighted(df_strategy, df_wealth)
+    
+    # Max Drawdown
+    drawdown_strat, drawdown_bench, DsMDb = GF.MaxDrawdown(df_ret_strat, df_ret_bench, 'ret_net', 'ret',)
+    
+    # Capture Ratio
+    geo_downside_capture, _, _, _ = GF.CaptureRatio(df_ret_strat, df_ret_bench, 'ret_net', 'ret')
+    
+    # Alpha and Beta
+    alpha_annualized, beta = GF.calculate_alpha_beta(df_ret_strat, df_ret_bench, 'ret_net', 'ret', risk_free)
+
+    #--- Store in containers ---
+    per_model_returns[model_name]  = df_ret_strat
+    per_model_strategy[model_name] = df_strategy
+
+    per_model_metrics.append({
+        'run_id'           : settings_string(run_settings),
+        'model_name'       : model_name,
+        'prediction_col'   : prediction_col,
+        'flat_MaxPi'       : run_settings['flatMaxPi'],
+        'flat_MaxPi_limit' : run_settings['flatMaxPiVal'], 
+        'w_upperLimit'     : run_settings['Wmax'],
+        'w_lowerLimit'     : run_settings['Wmin'],
+        'vol_scaler'       : run_settings['volScaler'],
+        'tc_scaler'        : run_settings['tcScaler'],
+        'Sharpe_strategy'  : Sharpe_strategy,
+        'mu_strategy'      : mu_strategy,
+        'sigma_strategy'   : sigma_strategy,
+        'Sharpe_benchmark' : Sharpe_benchmark,
+        'mu_benchmark'     : mu_benchmark,
+        'sigma_benchmark'  : sigma_benchmark,
+        'information_ratio': information_ratio,
+        'turnover'         : turnover,
+        'drawdown_strat'   : drawdown_strat,
+        'drawdown_bench'   : drawdown_bench,
+        'DsMDb'            : DsMDb,
+        'geo_downside_capture': geo_downside_capture,
+        'alpha_annualized' : alpha_annualized,
+        'beta'             : beta,
+    })
+    
+    #--- Save per-model pickle (with settings attached) ---
+    result_dict = {
+    'run_settings' : run_settings,
+    'model_name'   : model_name,
+    'prediction_col': prediction_col,
+    'Strategy'     : df_strategy,
+    'Profit'       : df_ret_strat,
+    'mu_strategy'  : mu_strategy,
+    'sigma_strategy': sigma_strategy,
+    'Sharpe_strategy': Sharpe_strategy,
+    'Sharpe_benchmark': Sharpe_benchmark}
+
+    safe_model_name = re.sub(r"[^0-9a-zA-Z]+", "_", model_name).strip("_")
+    filename = f"{settings_string(run_settings)}__{safe_model_name}.pkl"
+    
+    with open(os.path.join(path, "Results", filename), "wb") as f:
+        pickle.dump(result_dict, f)
+    
+    print(f"Saved model results to: {filename}")
+    
+#%% Plots
+
+plt.figure(figsize=(10, 6))
+
+# Plot each model’s cumulative net return
+for model_name, df_ret_strat in per_model_returns.items():
+    plt.plot(
+        df_ret_strat['eom'],
+        df_ret_strat['cumret_net'],
+        label=f"{model_name} (net)"
+    )
+
+# Plot benchmark (aligned to min/max dates of all strategies)
+all_eoms = pd.concat([df['eom'] for df in per_model_returns.values()]).unique()
+df_bench_plot = (
+    df_spy_run[df_spy_run['eom'].isin(all_eoms)]
+    .copy()
+    .assign(cumulative_return=lambda df: (1.0 + df['ret']).cumprod())
+    .reset_index(drop=True)
+)
+
+plt.plot(df_bench_plot['eom'], df_bench_plot['cumulative_return'], linestyle='--', label='SPY benchmark')
+
+plt.xlabel("Date")
+plt.ylabel("Cumulative Return")
+plt.title(f"Cumulative Returns – All Models vs SPY\nSettings ID: {run_id}")
 plt.legend()
+plt.tight_layout()
+
+# Save the plot
+plot_filename = os.path.join(path, "Results", f"cumulative_returns_{run_id}.png")
+plt.savefig(plot_filename, dpi=300)
 plt.show()
 
-#---- Compute Sharpe Ratio ----
-#Merge risk-free Rate
-df_profit = (df_profit
-             .merge(risk_free, on = 'eom', how = 'left')
-             .assign(ret_exc = lambda df: df['strategy_profit'] - df['rf'])
-             )
-df_spy = (df_spy.merge(risk_free, on = 'eom', how = 'left')
-          .assign(ret_exc = lambda df: df['ret'] - df['rf'])
-          )
+print(f"Saved comparison plot to: {plot_filename}")
 
-#Sharpe Ratio Strategy
-mu_s, sigma_s = df_profit['ret_exc'].mean(), df_profit['ret_exc'].std(ddof=1) 
-Sharpe_s = np.sqrt(12) * (mu_s / sigma_s)
+#%% Table
 
-#Sharpe Ratio Benchmark
-mu_b, sigma_b = df_spy['ret_exc'].mean(), df_spy['ret_exc'].std(ddof=1)
-Sharpe_b = np.sqrt(12) * (mu_b / sigma_b)
+metrics_df = pd.DataFrame(per_model_metrics)
 
-#---- Compute Information Ratio ----
-information_ratio = np.sqrt(12) * np.mean(df_profit['ret_exc'] - df_spy['ret_exc'])/((df_profit['ret_exc'] - df_spy['ret_exc']).std(ddof=1))
+summary_filename = os.path.join(path, "Results", f"summary_metrics_{run_id}.csv")
+metrics_df.to_csv(summary_filename, index=False)
+print(f"Saved summary metrics to: {summary_filename}")
 
-"""
-An IR = 0.5 means:
+    
+    
+#%%
+# Plot Comparison to Benchmark
+plt.plot(df_ret_strat['eom'], df_ret_strat['cumret_net'], label ='Strategy')
+plt.plot(df_ret_bench['eom'], df_ret_bench['cumulative_return'], label ='SPY')
+plt.legend()
+plt.show()
+    
 
-For every 1% of tracking error (volatility of return relative to the benchmark), your portfolio earns 0.5% of excess return on average per year.
-
-Put differently:
-
-The strategy adds 0.5 units of active return per unit of active risk.
-"""
+    
+    #%% Export Table
+    
+    table_string = (f"{flat_MaxPi_limit}, Yes, No & XGB & S&P500 & "
+                    f"{np.round(Sharpe_strategy,3)} &  {np.round(mu_strategy*100,2)}% & {np.round(sigma_strategy*100,2)}% & "
+                    f"{np.round(drawdown_strat*100,2)}% & {np.round(geo_downside_capture,2)} & "
+                    f"{np.round(alpha_annualized*100,2)}% & {np.round(beta,2)}"
+                    )
+    with open(path + "results.txt", "w") as f:
+        f.write(table_string + "\n")
+    
+    #%% Save Results
+    
+    params = (f"flat_MaxPi: {flat_MaxPi}, flat_MaxPi_limit: {flat_MaxPi_limit}, "
+               f"w_upperLimit: {w_upperLimit}, w_lowerLimit: {w_lowerLimit}, "
+               f"vol_scaler: {vol_scaler}, "
+               f"tc_scaler: {tc_scaler}"
+               )
+    
+    results = {'Parameters': params,
+               'Strategy': df_strategy,
+               'Profit': df_ret_strat,
+               'mu_strategy': mu_strategy,
+               'sigma_strategy': sigma_strategy,
+               'Sharpe_strategy': Sharpe_strategy,
+               'Thoughts': ("")}
+    
+    filename_clean = params.replace(": ", "-").replace(", ", "_").replace(".", "")
+    
+    # 2. Add the extension
+    filename = f"{filename_clean}.pkl"
+    
+    # 3. Save the dictionary
+    # 'wb' stands for 'write binary', which is required for pickling
+    with open(path + "Results/" + filename, 'wb') as f:
+        pickle.dump(results, f)
+    
+    print(f"Successfully saved to: {filename}")
+    
+    
+    """
+    Per Transaction cost, switch vol-penalty on and off to see its effect.
+    Then, switch maxPi on and off to see the effect.
+    
+    Basically the algorithm wins if its relative gains are larger than its relative losses.
+    So in good phases the algorithm wins over the index, but in bad phases it does crash
+    more than the index. In periods of long crashes the algorithm will get closer to the index
+    
+    Check if ret_strategy - ret_index <-10% given ret_index <0. This is a drawdown measure
+    and penalises too risky algorithms, i.e. it narrows down my hyperparameter space.
+    Alternatively, I can exclude all strategies that are 10% more volatile than benchmark.
+    """
