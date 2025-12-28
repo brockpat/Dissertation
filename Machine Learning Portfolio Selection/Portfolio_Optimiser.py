@@ -1000,11 +1000,16 @@ estimators = [
           'XGBReg_ZscoreTrTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12'
           ]
 
-estimators = ['TransformerSet_LevelTrMsp500Target_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12']
+estimators = ['IPCA_LevelTrMsp500Target_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
+    'IPCA_LevelTrMsp500Target_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12']
 
 #Load return predictions
 #At 'eom', predictions are for eom+1
 df_retPred = GF.load_MLpredictions(Models, estimators) 
+"""
+CAUTION: I need a safeguard that I df_retPred only contains the S&P 500 stocks when feeding
+them into optimise_portfolio().
+"""
 
 #Get names of return predictors
 prediction_cols = list(df_retPred.columns.drop(['id','eom']).astype('string'))
@@ -1039,11 +1044,11 @@ if include_rf_asset:
 #---- Common Settings for This Run (same for all models) ----
 run_settings = dict(includeRF    = include_rf_asset,
                     flatMaxPi    = True,
-                    flatMaxPiVal = 0.15,
+                    flatMaxPiVal = 1.0,
                     Wmax         = None,
                     Wmin         = None,
-                    volScaler    = 1,
-                    tcScaler     = 0.0, 
+                    volScaler    = 1.0, 
+                    tcScaler     = 0.0, #noch 0.0
                     )
 
 print("Run ID:", settings_to_id(run_settings))

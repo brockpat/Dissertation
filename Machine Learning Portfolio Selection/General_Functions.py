@@ -560,7 +560,7 @@ def load_portfolio_backtest_data(con, start_date, sp500_ids, path, predictor):
     df_pf_weights : pandas.DataFrame
         DataFrame of portfolio weights and AUM growth factors with columns:
 
-        - ``id`` : stock identifier
+        - ``id`` : stock identifier of S&P500 stocks ONLY!
         - ``eom`` : end-of-month timestamp
         - ``pi`` : portfolio weight at the beginning of the month;
           initial month is value-weighted by market equity, subsequent
