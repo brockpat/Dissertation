@@ -29,7 +29,7 @@ import sqlite3
 
 import General_Functions as GF
 
-path = "C:/Users/pbrock/Desktop/ML/"
+path = "C:/Users/patri/Desktop/ML/"
 
 settings = GF.get_settings()
 

@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import pickle
+from scipy import stats
 
 #%% Hyperparameter
 
@@ -706,7 +707,153 @@ def load_MLpredictions(DataBase, ensemble:list):
         else:
             #Merge to existing dataframe
             df = df.merge(df_next, on=['id','eom'], how='outer')
-    #Drop Missing Values
-    df = df.dropna()
     
     return df
+
+#%% Performance Ratios
+
+def SharpeRatio(df, risk_free, return_col):
+    """
+    Computes the annualised Sharpe Ratio of a time series of monthly returns.
+    """
+    df = (df
+          .merge(risk_free, on = 'eom', how = 'left')
+          .assign(ret_exc = lambda df: df[return_col] - df['rf'])
+          )
+
+    #Sharpe Ratio Strategy
+    mu, sigma = df['ret_exc'].mean(), df['ret_exc'].std() 
+    Sharpe = np.sqrt(12) * (mu / sigma)
+    
+    return 12*mu, np.sqrt(12)*sigma, Sharpe
+
+def InformationRatio(strategy, benchmark, return_col_strat, return_col_bench, risk_free):
+    
+    #Merge risk-free rate
+    strategy = (strategy
+          .merge(risk_free, on = 'eom', how = 'left')
+          .assign(ret_exc = lambda df: df[return_col_strat] - df['rf'])
+          )
+    
+    benchmark = (benchmark
+          .merge(risk_free, on = 'eom', how = 'left')
+          .assign(ret_exc = lambda df: df[return_col_bench] - df['rf'])
+          )
+    
+    information_ratio = np.sqrt(12) * np.mean(strategy['ret_exc'] - benchmark['ret_exc'])/((strategy['ret_exc'] - benchmark['ret_exc']).std())
+    
+    return information_ratio
+
+def MaxDrawdown(strategy, benchmark, return_col_strat, return_col_bench):
+    """Calculates Maximum Drawdown from a return series."""
+    # Convert returns to a cumulative wealth index
+    comp_ret = (1 + strategy[return_col_strat]).cumprod()
+    # Calculate the running maximum
+    peaks = comp_ret.expanding(min_periods=1).max()
+    # Calculate drawdown relative to the peak and return the minimum (most negative) value
+    drawdown_strat = ((comp_ret / peaks) - 1).min()
+    
+    # Convert returns to a cumulative wealth index
+    comp_ret = (1 + benchmark[return_col_bench]).cumprod()
+    # Calculate the running maximum
+    peaks = comp_ret.expanding(min_periods=1).max()
+    # Calculate drawdown relative to the peak and return the minimum (most negative) value
+    drawdown_bench = ((comp_ret / peaks) - 1).min()
+    
+    return drawdown_strat, drawdown_bench, (drawdown_strat - drawdown_bench)
+
+def CaptureRatio(strategy, benchmark, return_col_strat, return_col_bench):
+    """
+    Calculates the Geometric Upside and Downside Capture Ratios.
+    This is preferred over arithmetic mean for accuracy since going down 5% and
+    back up 5% doesn't lead to being at the same level.
+    
+    If a fund has a downside capture ratio of 80%, then, during a period when 
+    the market dropped 10%, the fund only lost 8%
+    """
+    
+    # 1. Identify Downside Months (Benchmark < 0)
+    down_mask = benchmark[return_col_bench] < 0
+    strat_down = strategy[return_col_strat][down_mask]
+    bench_down = benchmark[return_col_bench][down_mask]
+    
+    # 2. Identify Upside Months (Benchmark > 0)
+    up_mask = benchmark[return_col_bench] > 0
+    strat_up = strategy[return_col_strat][up_mask]
+    bench_up = benchmark[return_col_bench][up_mask]
+
+    # Helper function for Geometric Mean Return
+    def geometric_mean(returns):
+        # (Product of (1+r))^(1/n) - 1
+        if len(returns) == 0: return np.nan
+        compounded = np.prod(1 + returns)
+        return compounded**(1 / len(returns)) - 1
+
+    # 3. Calculate Geometric Means
+    geo_avg_strat_down = geometric_mean(strat_down)
+    geo_avg_bench_down = geometric_mean(bench_down)
+    
+    geo_avg_strat_up = geometric_mean(strat_up)
+    geo_avg_bench_up = geometric_mean(bench_up)
+    
+    # 4. Calculate Means
+    avg_strat_down = strat_down.mean()
+    avg_bench_down = bench_down.mean()
+    
+    avg_strat_up = strat_up.mean()
+    avg_bench_up = bench_up.mean()
+    
+    # 5. Calculate Ratios
+    geo_downside_capture = geo_avg_strat_down / geo_avg_bench_down
+    geo_upside_capture = geo_avg_strat_up / geo_avg_bench_up
+    
+    downside_capture = avg_strat_down / avg_bench_down
+    upside_capture   = avg_strat_up / avg_bench_up
+    
+    return geo_downside_capture, geo_upside_capture, downside_capture, upside_capture
+
+def calculate_alpha_beta(strategy, benchmark, return_col_strat, return_col_bench, risk_free):
+    """Calculates Annualized Alpha and the Beta."""
+    y = strategy[return_col_strat] - risk_free[risk_free['eom'].isin(strategy['eom'].unique())]['rf']
+    x = benchmark[return_col_bench] - risk_free[risk_free['eom'].isin(strategy['eom'].unique())]['rf']
+    
+    # Linear Regression: y = alpha + beta * x
+    beta, alpha_monthly, r_value, p_value, std_err = stats.linregress(x, y)
+    
+    # Annualize Alpha
+    alpha_annualized = alpha_monthly*12 
+    return alpha_annualized, beta
+                                        
+def TurnoverAUMweighted(strategy, df_wealth):
+    # 1. Compute per-asset absolute weight changes
+    changes = (
+        strategy
+        .loc[:, ['eom', 'pi', 'pi_g_tm1']]
+        .assign(abs_weight_change=lambda df: (df['pi'] - df['pi_g_tm1']).abs())
+    )
+    
+    # 2. Aggregate to monthly gross turnover
+    monthly_gross_turnover = (
+        changes
+        .groupby('eom', as_index=False)['abs_weight_change']
+        .sum()
+        .rename(columns={'abs_weight_change': 'gross_turnover'})
+    )
+    
+    # 3. Compute AUM weights across time
+    aum_weights = (
+        df_wealth
+        .loc[:, ['eom', 'wealth']]
+        .assign(aum_weight=lambda df: df['wealth'] / df['wealth'].sum())
+    )
+    
+    # 4. AUM-weighted average turnover
+    aum_weighted_turnover = (
+        monthly_gross_turnover
+        .merge(aum_weights, on='eom', how='left')
+        .assign(weighted_turnover=lambda df: df['gross_turnover'] * df['aum_weight'])
+        ['weighted_turnover']
+        .sum()
+    )      
+
+    return aum_weighted_turnover
