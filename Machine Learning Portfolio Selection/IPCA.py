@@ -364,9 +364,9 @@ def identification_IPCA(
         Identified/normalised Gamma_alpha.
     Gamma_beta_id : ndarray, shape (L, K)
         Identified/normalised Gamma_beta.
-    F_id : ndarray, shape (K, T)
+    F : ndarray, shape (K, T)
         Identified/normalised factors.
-    F_tilde_id : ndarray, shape (K+1, T)
+    F_tilde : ndarray, shape (K+1, T)
         Stacked identified factors [1; F_id].
     """
     
@@ -374,10 +374,10 @@ def identification_IPCA(
     # SVD
     U, Svals, Vt = svd(Gamma_beta, full_matrices=False)
     # Rotate Γ_β
-    Gamma_beta = U[:, :K].astype(float_type)
+    Gamma_beta = U[:, :K]
     # Rotate every f_{t+1}
     R = (np.diag(Svals[:K]) @ Vt[:K, :]).astype(float_type)  # (K x K)
-    F = (R @ F).astype(float_type)
+    F = (R @ F)
 
     # --- (b) Diagonalise factor 2nd moment matrix and order descending
     Sigma_f = (F @ F.T) / T # Estimate 2nd moment matrix
@@ -386,14 +386,14 @@ def identification_IPCA(
     V = evecs[:, idx].astype(float_type)    # Eigenvector matrix
     
     # Rotate factors and Γ_β (Γ_β'Γ_β = I kept in tact)
-    F = (V.T @ F).astype(float_type)
-    Gamma_beta = (Gamma_beta @ V).astype(float_type)
+    F = (V.T @ F)
+    Gamma_beta = (Gamma_beta @ V)
 
     # --- (c) Orthogonalise Γ_α against Γ_β and adjust factors (xi shift)
     # OLS
     xi = lstsq(Gamma_beta.T @ Gamma_beta, Gamma_beta.T @ Gamma_alpha)[0]  # (K,)
     # Orthogonalise 
-    Gamma_alpha = (Gamma_alpha - Gamma_beta @ xi).astype(float_type)
+    Gamma_alpha = (Gamma_alpha - Gamma_beta @ xi)
     F = (F + xi.reshape(-1, 1))
 
     # --- (d) Sign restriction: make factor means positive
@@ -438,7 +438,7 @@ def convergence_IPCA(
         Current Gamma_alpha.
     Gamma_beta : ndarray, shape (L, K)
         Current Gamma_beta.
-    F_tilde : ndarray, shape (K, T)
+    F_tilde : ndarray, shape (K+1, T)
         Current factors (required if mode="projection").
     projection_old : ndarray, shape (L, T)
         Previous projection matrix (required if mode="projection").
@@ -607,7 +607,7 @@ def fit_IPCA(df, signals, target, float_type = np.float64, num_factors = 5, max_
         projection_old = projection.copy()
         
         # ---- Update factors and Γ~ ----
-        Gamma_alpha_new, Gamma_beta_new, F, F_tilde = \
+        Gamma_alpha, Gamma_beta, F, F_tilde = \
             factors_and_loadings_IPCA(x_mat, W_dict, dates, Gamma_alpha,
                                       Gamma_beta, F, L, K, float_type)
             
@@ -780,7 +780,7 @@ trading_dates = signal_months[trading_month_start:]
 # ================================================
 model_name = "IPCA"
 target_type = "LevelTrMsp500Target"
-file_end = f"CRSPUniverse_RankFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
+file_end = f"SP500Universe_ZscoreFeatures_RollingWindow_win{window_size}_val{validation_size}_test{test_size}"
 prediction_name = "ret_pred"
 
 #%% IPCA
