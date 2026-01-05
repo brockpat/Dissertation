@@ -491,7 +491,7 @@ def build_portfolio_dataframe(date, prev_date,
     if df_pf_t['lambda'].isna().sum() > 0:
         print("ERROR: A stock does not have a value for Kyle's Lambda")
 
-    #---- Realised Returns (to compute profit later) ---
+    # ---- Realised Returns (to compute profit later) ---
     # Merge realised return
     df_pf_t = df_pf_t.merge(df_returns[df_returns['eom'] == date][['id', 'tr']],
                             on='id', how='left')
@@ -991,17 +991,17 @@ df_pf_weights, df_kl, df_me, df_returns,\
 
 estimators = [
           # Baseline
-          'XGBReg_LevelTrMsp500Target_HPlenient_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
+          #'XGBRegHPlenient_LevelTrMsp500Target_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
           # Robustness Estimation Universe (CRSP vs. SP500)
-          'XGBReg_LevelTrMsp500Target_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12',
+          #'IPCA_LevelTrMsp500Target_SP500UniverseFL_ZscoreFeatures_RollingWindow_win120_val12_test12',
           # Robustness variable
-          'XGBReg_ZscoreTarget_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
+          #'TransformerSet_Dropout010_LevelTrMSp500Target_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
           # Robustness variable & Est. Univ
-          'XGBReg_ZscoreTrTarget_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12'
+          #'RFF_LevelTrMsp500Target_SP500UniverseFL_ZscoreFeatures_RollingWindow_win120_val12_test12',
+          #'IPCA_LevelTrMsp500Target_CRSPUniverse_ZscoreFeatures_RollingWindow_win120_val12_test12'
+          'MarketOracle'
           ]
 
-estimators = ['IPCA_LevelTrMsp500Target_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
-    'IPCA_LevelTrMsp500Target_CRSPUniverse_RankFeatures_RollingWindow_win120_val12_test12']
 
 #Load return predictions
 #At 'eom', predictions are for eom+1
@@ -1041,268 +1041,98 @@ if include_rf_asset:
 
 #%% Compute Optimal Portfolio
 
-#---- Common Settings for This Run (same for all models) ----
-run_settings = dict(includeRF    = include_rf_asset,
-                    flatMaxPi    = True,
-                    flatMaxPiVal = 1.0,
-                    Wmax         = None,
-                    Wmin         = None,
-                    volScaler    = 1.0, 
-                    tcScaler     = 0.0, #noch 0.0
-                    )
-
-print("Run ID:", settings_to_id(run_settings))
-print("Settings:", settings_string(run_settings))
-
-#---- Save empty portfolio weights ----
-df_pf_weights_base = df_pf_weights.copy()
-
-#---- Containers to collect results across models ----
-per_model_returns   = {}   # model_name -> df_ret_strat
-per_model_strategy  = {}   # model_name -> df_strategy
-per_model_metrics   = []   # list of dicts with metrics
-
-#---- Benchmark cumulative returns ----
-df_spy_run = (df_spy[df_spy['eom'].between(trading_start, trading_end)]
-              .assign(cumulative_return = lambda df: (1.0 + df['ret']).cumprod()
-                      )
-              )
+for val in [1.0, 0.5, 0.1, 0.01]:
     
-for model_name, prediction_col in zip(estimators, prediction_cols):
-    print("\n==============================")
-    print("Running model:", model_name)
-    print("    Prediction column:", prediction_col)
-    print("==============================")
+    #---- Common Settings for This Run (same for all models) ----
+    run_settings = dict(includeRF    = include_rf_asset,
+                        flatMaxPi    = True,
+                        flatMaxPiVal = 0.15,
+                        Wmax         = None,
+                        Wmin         = None,
+                        volScaler    = 1.0, 
+                        tcScaler     = val,
+                        )
     
-    # Use a fresh copy of the initial weights for each model
-    df_pf_weights = df_pf_weights_base.copy()
+    print("Run ID:", settings_to_id(run_settings))
+    print("Settings:", settings_string(run_settings))
     
-    #---- Compute Optimal Portfolio ----
-    df_strategy, df_pf_weights \
-        = optimise_portfolio(df_pf_weights, df_kl, df_me, dict_barra, df_returns, df_wealth, df_spy, 
-                           df_retPred, 
-                           trading_dates, 
-                           prediction_col, 
-                           run_settings['includeRF'],
-                           run_settings['flatMaxPi'], 
-                           run_settings['flatMaxPiVal'], #portfolio weight bound  [0,flat_MaxPi_limit] for every stock
-                           run_settings['Wmax'], 
-                           run_settings['Wmin'], #Benchmark dependent portfolio bound for every stock
-                           run_settings['volScaler'],
-                           run_settings['tcScaler'])
+    #---- Save empty portfolio weights ----
+    df_pf_weights_base = df_pf_weights.copy()
+    
+    #---- Containers to collect results across models ----
+    per_model_returns   = {}   # model_name -> df_ret_strat
+    per_model_strategy  = {}   # model_name -> df_strategy
+    per_model_metrics   = []   # list of dicts with metrics
+    
+    #---- Benchmark cumulative returns ----
+    df_spy_run = (df_spy[df_spy['eom'].between(trading_start, trading_end)]
+                  .assign(cumulative_return = lambda df: (1.0 + df['ret']).cumprod()
+                          )
+                  )
         
-    # Merge predicted returns
-    df_strategy = df_strategy.merge(df_retPred.get(['id','eom',prediction_col])
-                                    .assign(eom = lambda df: df['eom'] + pd.offsets.MonthEnd(1)),
-                                    on = ['id', 'eom'], how = 'left')
-    
-    #--- Compute strategy returns (net & gross) per month ---
-    df_ret_strat = (
-        df_strategy
-        .assign(ret_net_row = lambda df: df['rev'] - df['tc'])
-        .groupby('eom', as_index=False)
-        .agg(
-            ret_net   = ('ret_net_row', 'sum'),
-            ret_gross = ('rev', 'sum')
+    for model_name, prediction_col in zip(estimators, prediction_cols):
+        print("\n==============================")
+        print("Running model:", model_name)
+        print("    Prediction column:", prediction_col)
+        print("==============================")
+        
+        # Use a fresh copy of the initial weights for each model
+        df_pf_weights = df_pf_weights_base.copy()
+        
+        #---- Compute Optimal Portfolio ----
+        df_strategy, df_pf_weights \
+            = optimise_portfolio(df_pf_weights, df_kl, df_me, dict_barra, df_returns, df_wealth, df_spy, 
+                               df_retPred, 
+                               trading_dates, 
+                               prediction_col, 
+                               run_settings['includeRF'],
+                               run_settings['flatMaxPi'], 
+                               run_settings['flatMaxPiVal'], #portfolio weight bound  [0,flat_MaxPi_limit] for every stock
+                               run_settings['Wmax'], 
+                               run_settings['Wmin'], #Benchmark dependent portfolio bound for every stock
+                               run_settings['volScaler'],
+                               run_settings['tcScaler'])
+            
+        # Merge predicted returns
+        df_strategy = df_strategy.merge(df_retPred.get(['id','eom',prediction_col])
+                                        .assign(eom = lambda df: df['eom'] + pd.offsets.MonthEnd(1)),
+                                        on = ['id', 'eom'], how = 'left')
+        
+        #--- Compute strategy returns (net & gross) per month ---
+        df_ret_strat = (
+            df_strategy
+            .assign(ret_net_row = lambda df: df['rev'] - df['tc'])
+            .groupby('eom', as_index=False)
+            .agg(
+                ret_net   = ('ret_net_row', 'sum'),
+                ret_gross = ('rev', 'sum')
+            )
+            .assign(
+                cumret_net   = lambda df: (1.0 + df['ret_net']).cumprod(),
+                cumret_gross = lambda df: (1.0 + df['ret_gross']).cumprod()
+            )
         )
-        .assign(
-            cumret_net   = lambda df: (1.0 + df['ret_net']).cumprod(),
-            cumret_gross = lambda df: (1.0 + df['ret_gross']).cumprod()
-        )
-    )
+        
+        # Compute cumulative monthly profit for benchmark
+        df_ret_bench = (df_spy[df_spy['eom'].isin(df_ret_strat['eom'].unique())]
+                               .assign(cumulative_return = lambda df: (1+df['ret']).cumprod())
+                               .reset_index(drop = True)
+                               )
+        
+        
+        #--- Save per-model pickle (with settings attached) ---
+        result_dict = {
+        'run_settings' : run_settings,
+        'model_name'   : model_name,
+        'prediction_col': prediction_col,
+        'Strategy'     : df_strategy,
+        'Profit'       : df_ret_strat,
+        }
     
-    # Compute cumulative monthly profit for benchmark
-    df_ret_bench = (df_spy[df_spy['eom'].isin(df_ret_strat['eom'].unique())]
-                           .assign(cumulative_return = lambda df: (1+df['ret']).cumprod())
-                           .reset_index(drop = True)
-                           )
-    
-    #---- Compute Performance Measures ----
-    
-    # Sharpe Ratio
-    mu_strategy, sigma_strategy, Sharpe_strategy = GF.SharpeRatio(df_ret_strat, risk_free, 
-                                                                  return_col = 'ret_gross')
-    mu_benchmark, sigma_benchmark, Sharpe_benchmark = GF.SharpeRatio(df_ret_bench, risk_free, 
-                                                                  return_col = 'ret')
-    
-    # Information Ratio
-    information_ratio = GF.InformationRatio(df_ret_strat, df_ret_bench, 'ret_gross', 'ret', risk_free)
-    
-    """
-    An IR = 0.5 means:
-    
-    For every 1% of tracking error (volatility of return relative to the benchmark), your portfolio earns 0.5% of excess return on average per year.
-    
-    Put differently:
-    
-    The strategy adds 0.5 units of active return per unit of active risk.
-    """
-    
-    # turnover
-    turnover = GF.TurnoverAUMweighted(df_strategy, df_wealth)
-    
-    # Max Drawdown
-    drawdown_strat, drawdown_bench, DsMDb = GF.MaxDrawdown(df_ret_strat, df_ret_bench, 'ret_net', 'ret',)
-    
-    # Capture Ratio
-    geo_downside_capture, _, _, _ = GF.CaptureRatio(df_ret_strat, df_ret_bench, 'ret_net', 'ret')
-    
-    # Alpha and Beta
-    alpha_annualized, beta = GF.calculate_alpha_beta(df_ret_strat, df_ret_bench, 'ret_net', 'ret', risk_free)
-
-    #--- Store in containers ---
-    per_model_returns[model_name]  = df_ret_strat
-    per_model_strategy[model_name] = df_strategy
-
-    per_model_metrics.append({
-        'run_id'           : settings_string(run_settings),
-        'model_name'       : model_name,
-        'prediction_col'   : prediction_col,
-        'flat_MaxPi'       : run_settings['flatMaxPi'],
-        'flat_MaxPi_limit' : run_settings['flatMaxPiVal'], 
-        'w_upperLimit'     : run_settings['Wmax'],
-        'w_lowerLimit'     : run_settings['Wmin'],
-        'vol_scaler'       : run_settings['volScaler'],
-        'tc_scaler'        : run_settings['tcScaler'],
-        'Sharpe_strategy'  : Sharpe_strategy,
-        'mu_strategy'      : mu_strategy,
-        'sigma_strategy'   : sigma_strategy,
-        'Sharpe_benchmark' : Sharpe_benchmark,
-        'mu_benchmark'     : mu_benchmark,
-        'sigma_benchmark'  : sigma_benchmark,
-        'information_ratio': information_ratio,
-        'turnover'         : turnover,
-        'drawdown_strat'   : drawdown_strat,
-        'drawdown_bench'   : drawdown_bench,
-        'DsMDb'            : DsMDb,
-        'geo_downside_capture': geo_downside_capture,
-        'alpha_annualized' : alpha_annualized,
-        'beta'             : beta,
-    })
-    
-    #--- Save per-model pickle (with settings attached) ---
-    result_dict = {
-    'run_settings' : run_settings,
-    'model_name'   : model_name,
-    'prediction_col': prediction_col,
-    'Strategy'     : df_strategy,
-    'Profit'       : df_ret_strat,
-    'mu_strategy'  : mu_strategy,
-    'sigma_strategy': sigma_strategy,
-    'Sharpe_strategy': Sharpe_strategy,
-    'Sharpe_benchmark': Sharpe_benchmark}
-
-    safe_model_name = re.sub(r"[^0-9a-zA-Z]+", "_", model_name).strip("_")
-    filename = f"{settings_string(run_settings)}__{safe_model_name}.pkl"
-    
-    with open(os.path.join(path, "Results", filename), "wb") as f:
-        pickle.dump(result_dict, f)
-    
-    print(f"Saved model results to: {filename}")
-    
-#%% Plots
-
-plt.figure(figsize=(10, 6))
-
-# Plot each model’s cumulative net return
-for model_name, df_ret_strat in per_model_returns.items():
-    plt.plot(
-        df_ret_strat['eom'],
-        df_ret_strat['cumret_net'],
-        label=f"{model_name} (net)"
-    )
-
-# Plot benchmark (aligned to min/max dates of all strategies)
-all_eoms = pd.concat([df['eom'] for df in per_model_returns.values()]).unique()
-df_bench_plot = (
-    df_spy_run[df_spy_run['eom'].isin(all_eoms)]
-    .copy()
-    .assign(cumulative_return=lambda df: (1.0 + df['ret']).cumprod())
-    .reset_index(drop=True)
-)
-
-plt.plot(df_bench_plot['eom'], df_bench_plot['cumulative_return'], linestyle='--', label='SPY benchmark')
-
-plt.xlabel("Date")
-plt.ylabel("Cumulative Return")
-plt.title(f"Cumulative Returns – All Models vs SPY\nSettings ID: {run_id}")
-plt.legend()
-plt.tight_layout()
-
-# Save the plot
-plot_filename = os.path.join(path, "Results", f"cumulative_returns_{run_id}.png")
-plt.savefig(plot_filename, dpi=300)
-plt.show()
-
-print(f"Saved comparison plot to: {plot_filename}")
-
-#%% Table
-
-metrics_df = pd.DataFrame(per_model_metrics)
-
-summary_filename = os.path.join(path, "Results", f"summary_metrics_{run_id}.csv")
-metrics_df.to_csv(summary_filename, index=False)
-print(f"Saved summary metrics to: {summary_filename}")
-
-    
-    
-#%%
-# Plot Comparison to Benchmark
-plt.plot(df_ret_strat['eom'], df_ret_strat['cumret_net'], label ='Strategy')
-plt.plot(df_ret_bench['eom'], df_ret_bench['cumulative_return'], label ='SPY')
-plt.legend()
-plt.show()
-    
-
-    
-    #%% Export Table
-    
-    table_string = (f"{flat_MaxPi_limit}, Yes, No & XGB & S&P500 & "
-                    f"{np.round(Sharpe_strategy,3)} &  {np.round(mu_strategy*100,2)}% & {np.round(sigma_strategy*100,2)}% & "
-                    f"{np.round(drawdown_strat*100,2)}% & {np.round(geo_downside_capture,2)} & "
-                    f"{np.round(alpha_annualized*100,2)}% & {np.round(beta,2)}"
-                    )
-    with open(path + "results.txt", "w") as f:
-        f.write(table_string + "\n")
-    
-    #%% Save Results
-    
-    params = (f"flat_MaxPi: {flat_MaxPi}, flat_MaxPi_limit: {flat_MaxPi_limit}, "
-               f"w_upperLimit: {w_upperLimit}, w_lowerLimit: {w_lowerLimit}, "
-               f"vol_scaler: {vol_scaler}, "
-               f"tc_scaler: {tc_scaler}"
-               )
-    
-    results = {'Parameters': params,
-               'Strategy': df_strategy,
-               'Profit': df_ret_strat,
-               'mu_strategy': mu_strategy,
-               'sigma_strategy': sigma_strategy,
-               'Sharpe_strategy': Sharpe_strategy,
-               'Thoughts': ("")}
-    
-    filename_clean = params.replace(": ", "-").replace(", ", "_").replace(".", "")
-    
-    # 2. Add the extension
-    filename = f"{filename_clean}.pkl"
-    
-    # 3. Save the dictionary
-    # 'wb' stands for 'write binary', which is required for pickling
-    with open(path + "Results/" + filename, 'wb') as f:
-        pickle.dump(results, f)
-    
-    print(f"Successfully saved to: {filename}")
-    
-    
-    """
-    Per Transaction cost, switch vol-penalty on and off to see its effect.
-    Then, switch maxPi on and off to see the effect.
-    
-    Basically the algorithm wins if its relative gains are larger than its relative losses.
-    So in good phases the algorithm wins over the index, but in bad phases it does crash
-    more than the index. In periods of long crashes the algorithm will get closer to the index
-    
-    Check if ret_strategy - ret_index <-10% given ret_index <0. This is a drawdown measure
-    and penalises too risky algorithms, i.e. it narrows down my hyperparameter space.
-    Alternatively, I can exclude all strategies that are 10% more volatile than benchmark.
-    """
+        safe_model_name = re.sub(r"[^0-9a-zA-Z]+", "_", model_name).strip("_")
+        filename = f"{settings_string(run_settings)}_{safe_model_name}.pkl"
+        
+        with open(os.path.join(path, "Portfolios", filename), "wb") as f:
+            pickle.dump(result_dict, f)
+        
+        print(f"Saved model results to: {filename}")
