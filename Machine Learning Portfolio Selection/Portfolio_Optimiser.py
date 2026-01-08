@@ -123,6 +123,7 @@ def optimise_portfolio(
     w_lowerLimit: float,
     vol_scaler: float,
     tc_scaler: float,
+    Ridge = False
 ) -> pd.DataFrame:
     
     """
@@ -255,7 +256,8 @@ def optimise_portfolio(
         
         df_pf_t = build_portfolio_dataframe(date, prev_date,
                                       active, stayers, newcomers, leavers, zeros,
-                                      df_pf_weights, df_kl, df_returns)
+                                      df_pf_weights, df_kl, df_returns,
+                                      df_me)
         
         #==========================================================
         #           Solve for optimal portfolio
@@ -268,7 +270,7 @@ def optimise_portfolio(
                                   df_pf_t, df_kl_active, df_ret_pred_active, Sigma_active, 
                                   df_me, df_spy, df_wealth, prediction_col, include_rf_asset,
                                   flat_MaxPi, flat_MaxPi_limit,
-                                  w_upperLimit, w_lowerLimit, vol_scaler)
+                                  w_upperLimit, w_lowerLimit, vol_scaler, tc_scaler, Ridge)
         
         # Convert to Series
         pi_opt = pd.Series(pi_opt, index=active, name='pi_opt')
@@ -289,12 +291,13 @@ def optimise_portfolio(
         #           Compute Revenue & TC
         #==========================================================
         
-        # Get wealth level
+        # Get Baseline wealth level
         w = df_wealth[df_wealth['eom'] == date]['wealth'].iloc[0]
         
         # Compute revenue & transaction costs
         df_pf_t = (df_pf_t
                 .assign(rev = lambda df: df['pi']*df['tr'])
+                # Important: Transaction cost scale (tc_scaler) is absorbed into df['lambda']
                 .assign(tc = lambda df: (df['pi'] - df['pi_g_tm1'])**2 * df['lambda'] * float(w)/2 )
                 )
         
@@ -428,7 +431,8 @@ def reduce_to_active(prev_date, active, Sigma, df_kl, return_predictions):
 
 def build_portfolio_dataframe(date, prev_date,
                               active, stayers, newcomers, leavers, zeros,
-                              df_pf_weights, df_kl, df_returns):
+                              df_pf_weights, df_kl, df_returns,
+                              df_me):
     """
     Build the per-period portfolio dataframe used in optimisation.
     
@@ -470,7 +474,7 @@ def build_portfolio_dataframe(date, prev_date,
     df_pf_t = (pd.DataFrame({ #df_portfolio_t
         'id': list(stayers + newcomers + leavers),
         'eom': date,
-        'pi': np.array(1e-16)
+        'pi': np.array(1e-4)
     }).sort_values(by = 'id').reset_index(drop=True))
 
     # ---- Merge Kyle's lambda  ----
@@ -511,14 +515,14 @@ def build_portfolio_dataframe(date, prev_date,
     #Set value for newcomers to zero
     df_pf_t.loc[df_pf_t['id'].isin(newcomers), 'pi_g_tm1'] = 0
     
-    #---- Initialise 'pi_t' with 'pi_g_tm1' ----
+    # ---- Initialise 'pi_t' with 'pi_g_tm1' ----
     
     # Initialise pi_t with G @ pi_{t-1}
     df_pf_t.loc[df_pf_t['id'].isin(active), 'pi'] = df_pf_t.loc[df_pf_t['id'].isin(active), 'pi_g_tm1']
     
-    # For newcomers that are actively traded, g pi_{t-1} = 0.
+    # For newcomers that are actively traded --> g pi_{t-1} = 0.
     #   So, set pi_t to some epsilon (else-wise log(pi_t) undefined)
-    df_pf_t.loc[(df_pf_t['pi'] == 0.0) & df_pf_t['id'].isin(active), 'pi'] = 1e-16
+    df_pf_t.loc[(df_pf_t['pi'] == 0.0) & df_pf_t['id'].isin(active), 'pi'] = 1e-4
     
     # Set any 'pi' for zeros to 0.0
     df_pf_t.loc[df_pf_t['id'].isin(zeros), 'pi'] = 0.0
@@ -530,7 +534,7 @@ def solve_pf_optimisation(prev_date, date,
                           df_pf_t, df_kl_active, df_ret_pred_active, Sigma_active, 
                           df_me, df_spy, df_wealth, prediction_col, include_rf_asset,
                           flat_MaxPi, flat_MaxPi_limit,
-                          w_upperLimit, w_lowerLimit, vol_scaler):
+                          w_upperLimit, w_lowerLimit, vol_scaler, tc_scaler, Ridge):
     
     """
     Solve the one-period myopic portfolio optimisation for date t.
@@ -592,33 +596,33 @@ def solve_pf_optimisation(prev_date, date,
 
     # ---- Define Torch Objects ----
     # Return predictions
-    r = torch.tensor(df_ret_pred_active[prediction_col], dtype=torch.float32)
+    r = torch.tensor(df_ret_pred_active[prediction_col], dtype=torch.float64)
     
     # Covariance Matrix 
-    S = torch.tensor(Sigma_active.to_numpy(), dtype=torch.float32)
+    S = torch.tensor(Sigma_active.to_numpy(), dtype=torch.float64)
     
     # Kyle's Lambda (diagonal) Matrix
-    L_diag = torch.tensor(df_kl_active['lambda'], dtype=torch.float32)
+    L_diag = torch.tensor(df_kl_active['lambda'], dtype=torch.float64)
 
     # Wealth (AUM)
-    w = torch.tensor(df_wealth[df_wealth['eom'] == date]['wealth'].iloc[0], dtype=torch.float32)
+    w = torch.tensor(df_wealth[df_wealth['eom'] == date]['wealth'].iloc[0], dtype=torch.float64)
     
     # Drifted portfolio weights G @ pi_{t-1}
     pi_g_tm1 = torch.tensor(df_pf_t[df_pf_t['id'].isin(active)]['pi_g_tm1'].to_numpy(),
-                            dtype=torch.float32)
+                            dtype=torch.float64)
     
     # Logits of pi_t
     pi_logits = torch.tensor(
         np.log(df_pf_t[df_pf_t['id'].isin(active)]['pi'].to_numpy()),
         requires_grad=True,
-        dtype=torch.float32
+        dtype=torch.float64
     )
     
     # ---- Bound on pi_t ----
     
     if flat_MaxPi:
-        max_pi = torch.tensor(flat_MaxPi_limit, dtype=torch.float32)
-        min_pi = torch.tensor(0.0, dtype=torch.float32)
+        max_pi = torch.tensor(flat_MaxPi_limit, dtype=torch.float64)
+        min_pi = torch.tensor(0.0, dtype=torch.float64)
         
     else:
         weights_df = (df_me
@@ -660,7 +664,10 @@ def solve_pf_optimisation(prev_date, date,
         
         # Transaction costs
         diff = pi - pi_g_tm1
-        tc = 0.5 * w * (L_diag * diff.pow(2)).sum()
+        if Ridge:
+            tc = diff.pow(2).sum() * torch.tensor(tc_scaler) #tc_scaler acts as ​\gamma.
+        else:
+            tc = 0.5 * w * (L_diag * diff.pow(2)).sum()
         
         # pi_t bounds violation
         max_pi_violation = (penalty_maxPi * F.relu(pi - max_pi)).sum()
@@ -982,8 +989,9 @@ sp500_constituents = (pd.read_sql_query("SELECT * FROM SP500_Constituents_monthl
 
 df_pf_weights, df_kl, df_me, df_returns,\
     df_wealth, dict_barra = GF.load_portfolio_backtest_data(JKP_Factors, start_date, 
-                                          sp500_ids, path, 
-                                          predictor = "Myopic Oracle")
+                                          sp500_ids, path)
+    
+
     
 #==================================================
 #      Model Predictions (Requires Manual Updating)
@@ -997,9 +1005,9 @@ estimators = [
           # Robustness variable
           #'TransformerSet_Dropout010_LevelTrMSp500Target_SP500UniverseFL_RankFeatures_RollingWindow_win120_val12_test12',
           # Robustness variable & Est. Univ
-          #'RFF_LevelTrMsp500Target_SP500UniverseFL_ZscoreFeatures_RollingWindow_win120_val12_test12',
+          'RFF_LevelTrMsp500Target_SP500UniverseFL_ZscoreFeatures_RollingWindow_win120_val12_test12',
           #'IPCA_LevelTrMsp500Target_CRSPUniverse_ZscoreFeatures_RollingWindow_win120_val12_test12'
-          'MarketOracle'
+          #'MarketOracle'
           ]
 
 
@@ -1041,7 +1049,10 @@ if include_rf_asset:
 
 #%% Compute Optimal Portfolio
 
-for val in [1.0, 0.5, 0.1, 0.01]:
+# If True: Computes the transaction cost term as a Ridge regularisation on portfolio changes
+Ridge = False # Use e.g. for tc_scale in [25.0] for the regularisation
+
+for tc_scale in [1.0, 0.5, 0.1, 0.01]:
     
     #---- Common Settings for This Run (same for all models) ----
     run_settings = dict(includeRF    = include_rf_asset,
@@ -1050,8 +1061,10 @@ for val in [1.0, 0.5, 0.1, 0.01]:
                         Wmax         = None,
                         Wmin         = None,
                         volScaler    = 1.0, 
-                        tcScaler     = val,
+                        tcScaler     = tc_scale,
                         )
+    tc_to_run = [1.0, 0.5, 0.1, 0.01] if Ridge else [run_settings['tcScaler']]
+
     
     print("Run ID:", settings_to_id(run_settings))
     print("Settings:", settings_string(run_settings))
@@ -1091,48 +1104,73 @@ for val in [1.0, 0.5, 0.1, 0.01]:
                                run_settings['Wmax'], 
                                run_settings['Wmin'], #Benchmark dependent portfolio bound for every stock
                                run_settings['volScaler'],
-                               run_settings['tcScaler'])
+                               run_settings['tcScaler'],
+                               Ridge)
             
         # Merge predicted returns
         df_strategy = df_strategy.merge(df_retPred.get(['id','eom',prediction_col])
                                         .assign(eom = lambda df: df['eom'] + pd.offsets.MonthEnd(1)),
-                                        on = ['id', 'eom'], how = 'left')
-        
-        #--- Compute strategy returns (net & gross) per month ---
-        df_ret_strat = (
-            df_strategy
-            .assign(ret_net_row = lambda df: df['rev'] - df['tc'])
-            .groupby('eom', as_index=False)
-            .agg(
-                ret_net   = ('ret_net_row', 'sum'),
-                ret_gross = ('rev', 'sum')
+                                        on = ['id', 'eom'], how = 'left')  
+
+        for tc_scaler in tc_to_run:
+            if Ridge: # !! Must compute transaction costs ex-post !!
+            
+                # Merge Wealth to recompute Transaction Costs
+                df_strategy = df_strategy.merge(df_wealth[['eom','wealth']], on = ['eom'], how = 'left')
+            
+                # Merge Baseline Lambda
+                df_strategy = df_strategy.drop(columns = 'lambda')
+                df_strategy = df_strategy.merge(df_kl, on = ['id','eom'])
+                # Compute Transaction Costs
+                df_strategy = (df_strategy
+                               .assign(tc = lambda df: 
+                                       tc_scaler * df['wealth'] * 0.5 * df['lambda']
+                                                 * (df['pi']-df['pi_g_tm1'])**2)
+                                   .drop(columns = 'wealth')
+                                   )
+            
+            # ---- Compute strategy returns (net & gross) per month ----
+            df_ret_strat = (
+                df_strategy
+                .assign(ret_net_row = lambda df: df['rev'] - df['tc'])
+                .groupby('eom', as_index=False)
+                .agg(
+                    ret_net   = ('ret_net_row', 'sum'),
+                    ret_gross = ('rev', 'sum')
+                )
+                .assign(
+                    cumret_net   = lambda df: (1.0 + df['ret_net']).cumprod(),
+                    cumret_gross = lambda df: (1.0 + df['ret_gross']).cumprod()
+                )
             )
-            .assign(
-                cumret_net   = lambda df: (1.0 + df['ret_net']).cumprod(),
-                cumret_gross = lambda df: (1.0 + df['ret_gross']).cumprod()
-            )
-        )
+            
+            # Compute cumulative monthly profit for benchmark
+            df_ret_bench = (df_spy[df_spy['eom'].isin(df_ret_strat['eom'].unique())]
+                                   .assign(cumulative_return = lambda df: (1+df['ret']).cumprod())
+                                   .reset_index(drop = True)
+                                   )
+            
+            
+            # ---- Save per-model pickle (with settings attached) ----
+            result_dict = {
+            'run_settings' : run_settings,
+            'model_name'   : model_name,
+            'prediction_col': prediction_col,
+            'Strategy'     : df_strategy,
+            'Profit'       : df_ret_strat,
+            }
         
-        # Compute cumulative monthly profit for benchmark
-        df_ret_bench = (df_spy[df_spy['eom'].isin(df_ret_strat['eom'].unique())]
-                               .assign(cumulative_return = lambda df: (1+df['ret']).cumprod())
-                               .reset_index(drop = True)
-                               )
-        
-        
-        #--- Save per-model pickle (with settings attached) ---
-        result_dict = {
-        'run_settings' : run_settings,
-        'model_name'   : model_name,
-        'prediction_col': prediction_col,
-        'Strategy'     : df_strategy,
-        'Profit'       : df_ret_strat,
-        }
-    
-        safe_model_name = re.sub(r"[^0-9a-zA-Z]+", "_", model_name).strip("_")
-        filename = f"{settings_string(run_settings)}_{safe_model_name}.pkl"
-        
-        with open(os.path.join(path, "Portfolios", filename), "wb") as f:
-            pickle.dump(result_dict, f)
-        
-        print(f"Saved model results to: {filename}")
+            safe_model_name = re.sub(r"[^0-9a-zA-Z]+", "_", model_name).strip("_")
+            
+            if Ridge: # Reformat tcScaler to reflect ex-post transaction costs in the file name and not the Ridge Regularisation parameter \gamma
+                run_settings['tcScaler'] = tc_scaler
+            
+            filename = f"{settings_string(run_settings)}_{safe_model_name}.pkl"
+            
+            if Ridge:
+                filename = "Ridge_" + filename
+            
+            with open(os.path.join(path, "Portfolios", filename), "wb") as f:
+                pickle.dump(result_dict, f)
+            
+            print(f"Saved model results to: {filename}")
